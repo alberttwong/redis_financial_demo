@@ -1,0 +1,53 @@
+export type RedisConfig = {
+  url: string;
+  username?: string;
+  password?: string;
+  tls: boolean;
+};
+
+export type SeedConfig = {
+  accountCount: number;
+  securityCount: number;
+  positionsPerAccount: number;
+  transactionsPerAccount: number;
+  accountBytes: number;
+  securityBytes: number;
+  positionBytes: number;
+  transactionBytes: number;
+  randomSeed: number;
+};
+
+function readInt(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function getRedisConfig(): RedisConfig {
+  const url = process.env.REDIS_URL;
+  if (!url) {
+    throw new Error("REDIS_URL is required. Use a Redis Cloud rediss:// connection string.");
+  }
+
+  return {
+    url,
+    username: process.env.REDIS_USERNAME,
+    password: process.env.REDIS_PASSWORD,
+    tls: process.env.REDIS_TLS === "true" || url.startsWith("rediss://")
+  };
+}
+
+export function getSeedConfig(): SeedConfig {
+  return {
+    accountCount: readInt("SEED_ACCOUNTS", 100),
+    securityCount: readInt("SEED_SECURITIES", 500),
+    positionsPerAccount: readInt("SEED_POSITIONS_PER_ACCOUNT", 8),
+    transactionsPerAccount: readInt("SEED_TRANSACTIONS_PER_ACCOUNT", 60),
+    accountBytes: readInt("SEED_ACCOUNT_BYTES", 102_400),
+    securityBytes: readInt("SEED_SECURITY_BYTES", 8_192),
+    positionBytes: readInt("SEED_POSITION_BYTES", 8_192),
+    transactionBytes: readInt("SEED_TRANSACTION_BYTES", 8_192),
+    randomSeed: readInt("SEED_RANDOM", 20_260_518)
+  };
+}

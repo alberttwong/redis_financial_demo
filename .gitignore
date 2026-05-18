@@ -1,0 +1,16 @@
+.env
+.env.local
+.env.*.local
+.next/
+node_modules/
+coverage/
+dist/
+tsconfig.tsbuildinfo
+*.log
+memtier-output/
+monitor-input/
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+tfplan
+tfplan-*
