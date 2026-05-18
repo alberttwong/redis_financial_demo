@@ -69,7 +69,7 @@ Each SQL row becomes one flat Redis JSON document with SQL-friendly top-level fi
 
 Large non-indexed row content should live in a `payload` field so Redis Query Engine indexes remain narrow.
 
-Account information documents are expected to be about 100KB each. A single account-by-id lookup should return the full account JSON document, not a trimmed projection.
+Account information documents are expected to be about 100KB each. A single account-by-id lookup should return the full account JSON document, not a trimmed projection. The initial load profile generates 1,000 accounts, which is about 97.66 MiB of account JSON before Redis and index overhead.
 
 Position and transaction documents should support configurable payload sizes up to 400KB for stress and transfer-size tests.
 
@@ -259,11 +259,12 @@ Benchmark scripts should target Redis Cloud using:
 - Tunable pipeline depth
 - Tunable rate limiting
 
-The default target is about 60,000 Redis operations per second. Treat this as Redis ops/sec, not 60,000 full 400KB transaction document transfers per second.
+The default target is about 60,000 transaction-data operations per second. In the dedicated transaction profile, this is calculated as `threads * clients * MEMTIER_TRANSACTION_RATE_PER_CONNECTION`, with defaults `4 * 50 * 300 = 60,000`.
 
 Create separate profiles:
 
 - Full 100KB account `JSON.GET` reads
+- Transaction-data reads using live `JSON.GET txn:... $` commands when Redis is available
 - Secondary-index `FT.SEARCH` lookups
 - Mixed account/security/position/transaction lookup traffic
 - Runtime join support commands through monitor-input replay where practical
