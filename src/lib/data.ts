@@ -1,12 +1,12 @@
 import { faker } from "@faker-js/faker";
 import { accountKey, positionId, securityKey, transactionId } from "./keys";
 import { withSizedPayload } from "./payload";
+import { makeSp500Template } from "./sp500";
 import type { AccountRow, PositionRow, SecurityRow, TransactionRow } from "./types";
 
 const accountTypes = ["BROKERAGE", "IRA", "ROTH_IRA", "TRUST", "ADVISORY"];
 const registrationTypes = ["INDIVIDUAL", "JOINT", "CUSTODIAL", "TRUST", "CORPORATE"];
 const acctTypeCodes = ["CASH", "MARGIN", "RETIREMENT", "ADVISORY"];
-const assetClasses = ["EQUITY", "ETF", "MUTUAL_FUND", "FIXED_INCOME", "OPTION", "CASH"];
 const transactionTypes = ["BUY", "SELL", "DIVIDEND", "INTEREST", "TRANSFER", "FEE"];
 
 export function seedFaker(seed: number): void {
@@ -32,17 +32,24 @@ export function makeAccount(index: number, targetBytes: number): AccountRow {
 
 export function makeSecurity(index: number, targetBytes: number): SecurityRow {
   const securityId = `SEC${String(index + 1).padStart(8, "0")}`;
-  const symbol = faker.finance.currencyCode().slice(0, 3) + faker.string.alpha({ length: 2, casing: "upper" });
+  const base = makeSp500Template(index % 500);
+  const cycle = Math.floor(index / 500);
+  const symbol = cycle === 0 ? base.symbol : `${base.symbol}.${String.fromCharCode(65 + cycle)}`;
   return withSizedPayload(
     {
       _id: securityId,
       security_id: securityId,
-      security_no: `SNO${String(index + 1).padStart(8, "0")}`,
+      security_no: `SPX${String(index + 1).padStart(6, "0")}`,
       symbol,
       cusip: faker.string.alphanumeric({ length: 9, casing: "upper" }),
-      asset_class: faker.helpers.arrayElement(assetClasses),
-      issuer_name: faker.company.name(),
-      status: faker.helpers.arrayElement(["ACTIVE", "ACTIVE", "ACTIVE", "INACTIVE"])
+      asset_class: "EQUITY",
+      index_name: "S&P 500",
+      index_member: true,
+      sector: base.sector,
+      industry: base.industry,
+      exchange: base.exchange,
+      issuer_name: cycle === 0 ? base.issuer_name : `${base.issuer_name} Class ${String.fromCharCode(65 + cycle)}`,
+      status: "ACTIVE"
     },
     targetBytes
   );

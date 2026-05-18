@@ -9,7 +9,7 @@ export type SeedConfig = {
   accountCount: number;
   securityCount: number;
   positionsPerAccount: number;
-  transactionsPerAccount: number;
+  transactionCount: number;
   accountBytes: number;
   securityBytes: number;
   positionBytes: number;
@@ -43,7 +43,7 @@ export function getSeedConfig(): SeedConfig {
     accountCount: readInt("SEED_ACCOUNTS", 100),
     securityCount: readInt("SEED_SECURITIES", 500),
     positionsPerAccount: readInt("SEED_POSITIONS_PER_ACCOUNT", 8),
-    transactionsPerAccount: readInt("SEED_TRANSACTIONS_PER_ACCOUNT", 60),
+    transactionCount: readInt("SEED_TRANSACTIONS", readInt("SEED_TRANSACTIONS_PER_ACCOUNT", 60) * readInt("SEED_ACCOUNTS", 100)),
     accountBytes: readInt("SEED_ACCOUNT_BYTES", 102_400),
     securityBytes: readInt("SEED_SECURITY_BYTES", 8_192),
     positionBytes: readInt("SEED_POSITION_BYTES", 8_192),

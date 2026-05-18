@@ -17,6 +17,11 @@ export type SecurityRow = {
   symbol: string;
   cusip: string;
   asset_class: string;
+  index_name: string;
+  index_member: boolean;
+  sector: string;
+  industry: string;
+  exchange: string;
   issuer_name: string;
   status: string;
   payload: string;

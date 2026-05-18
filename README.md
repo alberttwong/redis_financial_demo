@@ -21,7 +21,7 @@ Open <http://localhost:3000>.
 ## Query Examples
 
 - Account by `account_id`, returning the full ~100KB JSON row.
-- Security by `security_id` or `security_no`.
+- Security by `security_id` or S&P 500-style `security_no`.
 - Position by composite id or `account_id`.
 - Transaction by composite id, `account_id`, `security_id`, or combined filters.
 - Runtime joins for account portfolios, account activity, security exposure, and transaction detail.
@@ -56,6 +56,11 @@ erDiagram
         string symbol
         string cusip
         string asset_class
+        string index_name
+        boolean index_member
+        string sector
+        string industry
+        string exchange
         string issuer_name
         string status
         json payload
@@ -207,7 +212,7 @@ This profile expands to:
 1,000 accounts
 1,000 securities
 8,000 positions
-60,000 transactions
+10,000 random transactions across the accounts
 1,000 account snapshots
 ```
 
@@ -239,16 +244,20 @@ MEMTIER_TRANSACTION_RATE_PER_CONNECTION=300
 
 Redis Cloud credentials are read from environment variables. Use the Terraform `redis_url` and `redis_tls` outputs for the exact protocol of the provisioned database.
 
+The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 10 GB dataset size, and throughput sizing set to 70,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
+
+Moving an existing Terraform-managed Essentials database to the default Pro/Flexible resource family is a replacement, not an in-place resize in this repo. Plan to export or reseed data when applying that change.
+
 ## Assumptions
 
 - SQL is the source of truth; Redis Cloud is the serving, search, and read-model layer.
 - Data is batch-loaded into Redis table by table, not streamed with CDC in this demo.
 - Redis stores one flat JSON document per logical SQL row, using SQL-friendly field names.
 - Account Info documents are expected to be about 100KB and single-account reads return the full JSON document.
-- Security Info documents are configurable up to 100KB.
+- Security Info documents are configurable up to 100KB and mimic S&P 500-style equity constituents with sector, industry, exchange, and index membership metadata.
 - Position and Transaction documents are configurable up to 400KB, but the default demo payloads are smaller to fit the current Redis Cloud demo database.
 - Initial load generates 1,000 accounts and 1,000 securities.
-- With the default initial-load ratios, 1,000 accounts produces 8,000 positions, 60,000 transactions, and 1,000 materialized account snapshots.
+- With the default initial-load profile, 1,000 accounts produces 8,000 positions, 10,000 random transactions across the account population, and 1,000 materialized account snapshots.
 - In a typical stock trading scenario, `transactions` are the incoming change/history records and `positions` are derived current or as-of holdings.
 - Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` to hydrate related JSON rows.
 - Redis is not used as a relational SQL join planner.
@@ -256,8 +265,9 @@ Redis Cloud credentials are read from environment variables. Use the Terraform `
 - The primary load test target is 60,000 transaction-data operations per second.
 - The trade-write load test randomly selects accounts and securities, generates transaction JSON rows, and writes them with `JSON.SET txn:... $ ...`.
 - `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.
-- The current Terraform defaults target Redis Cloud Essentials paid in AWS `us-west-2` using the Redis Cloud account's default payment method.
-- The current provisioned Essentials database reports `redis_tls=false`; use the Terraform `redis_tls` output rather than assuming TLS mode.
+- The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 10 GB dataset size, and 70,000 operations per second using the Redis Cloud account's default payment method.
+- Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.
+- The earlier provisioned Essentials database reported `redis_tls=false`; use the Terraform `redis_tls` output rather than assuming TLS mode.
 - Local `.env.local`, Terraform state, generated plan files, `.next`, `node_modules`, and benchmark outputs are intentionally ignored by git.
 - The Redis Cloud API keys previously used for provisioning should be rotated after the environment is stable.
 

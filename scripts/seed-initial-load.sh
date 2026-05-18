@@ -36,7 +36,7 @@ Initial load profile:
   accounts: ${SEED_ACCOUNTS}
   securities: ${SEED_SECURITIES}
   positions: $(( SEED_ACCOUNTS * SEED_POSITIONS_PER_ACCOUNT ))
-  transactions: $(( SEED_ACCOUNTS * SEED_TRANSACTIONS_PER_ACCOUNT ))
+  transactions: ${SEED_TRANSACTIONS}
   account payload only: ${account_gib} GiB before Redis/index overhead
 
 EOF

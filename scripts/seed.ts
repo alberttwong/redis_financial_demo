@@ -1,3 +1,4 @@
+import { faker } from "@faker-js/faker";
 import { createIndexes } from "../src/lib/indexes";
 import { jsonGet, jsonSet } from "../src/lib/json";
 import { getSeedConfig } from "../src/lib/config";
@@ -72,16 +73,25 @@ async function seedTransactions(): Promise<number> {
   const config = getSeedConfig();
   const accounts = makeAccounts();
   const securities = makeSecurities();
-  const rows = accounts.flatMap((account, accountIndex) =>
-    Array.from({ length: config.transactionsPerAccount }, (_, offset) => {
-      const security = securities[(accountIndex * config.transactionsPerAccount + offset) % securities.length];
-      const transaction = makeTransaction(account, security, config.transactionBytes);
-      return {
-        key: `txn:${transaction.account_id}:${transaction.security_id}:${transaction.trade_date}:${transaction.acct_type_code}`,
-        value: transaction
-      };
-    })
-  );
+  const rows: Array<{ key: string; value: unknown }> = [];
+  const usedKeys = new Set<string>();
+  let attempts = 0;
+
+  while (rows.length < config.transactionCount && attempts < config.transactionCount * 5) {
+    attempts += 1;
+    const account = faker.helpers.arrayElement(accounts);
+    const security = faker.helpers.arrayElement(securities);
+    const transaction = makeTransaction(account, security, config.transactionBytes);
+    const key = `txn:${transaction.account_id}:${transaction.security_id}:${transaction.trade_date}:${transaction.acct_type_code}`;
+    if (usedKeys.has(key)) continue;
+    usedKeys.add(key);
+    rows.push({ key, value: transaction });
+  }
+
+  if (rows.length < config.transactionCount) {
+    throw new Error(`Only generated ${rows.length} unique transactions after ${attempts} attempts.`);
+  }
+
   return writeBatch(rows);
 }
 
@@ -98,7 +108,7 @@ async function seedSnapshots(): Promise<number> {
     const portfolio = await accountPortfolioJoin({ client }, account.account_id);
     const activity = await accountActivityJoin({ client }, account.account_id);
     const positions = await positionsByAccount({ client }, account.account_id);
-    const transactions = await transactionsSearch({ client }, { accountId: account.account_id, limit: config.transactionsPerAccount });
+    const transactions = await transactionsSearch({ client }, { accountId: account.account_id, limit: Math.min(config.transactionCount, 100) });
 
     const snapshot: AccountSnapshot = {
       _id: account.account_id,

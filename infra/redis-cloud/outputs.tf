@@ -10,22 +10,32 @@ output "redis_port" {
 
 output "redis_tls" {
   description = "Whether the Redis Cloud endpoint has TLS enabled."
-  value       = rediscloud_essentials_database.demo.enable_tls
+  value       = local.redis_tls
 }
 
 output "redis_database_name" {
   description = "Redis Cloud database name."
-  value       = rediscloud_essentials_database.demo.name
+  value       = local.redis_database_name
 }
 
 output "rediscloud_subscription_id" {
-  description = "Redis Cloud Essentials subscription ID."
-  value       = rediscloud_essentials_subscription.demo.id
+  description = "Redis Cloud subscription ID."
+  value       = local.redis_subscription_id
 }
 
 output "rediscloud_database_id" {
   description = "Redis Cloud database ID."
-  value       = rediscloud_essentials_database.demo.db_id
+  value       = local.redis_database_id
+}
+
+output "rediscloud_subscription_type" {
+  description = "Redis Cloud subscription family."
+  value       = local.subscription_type
+}
+
+output "redis_dataset_size_in_gb" {
+  description = "Redis Cloud dataset size in GB when reported by the selected subscription type."
+  value       = local.redis_dataset_size_in_gb
 }
 
 output "redis_password" {
@@ -36,6 +46,6 @@ output "redis_password" {
 
 output "redis_url" {
   description = "Redis Cloud connection string for the demo app."
-  value       = "${rediscloud_essentials_database.demo.enable_tls ? "rediss" : "redis"}://default:${local.redis_password}@${rediscloud_essentials_database.demo.public_endpoint}"
+  value       = "${local.redis_tls ? "rediss" : "redis"}://default:${local.redis_password}@${local.redis_public_endpoint}"
   sensitive   = true
 }

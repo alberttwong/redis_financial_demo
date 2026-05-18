@@ -4,13 +4,24 @@ This Terraform stack provisions the Redis Cloud database for the financial query
 
 Defaults:
 
-- Redis Cloud Essentials paid
+- Redis Cloud Pro/Flexible
 - AWS `us-west-2`
 - Subscription: `lpl-redis-demo`
 - Database: `lpl-query-patterns`
+- Redis version: `8.4`
+- Dataset size: 10 GB
+- Throughput sizing: 70,000 operations per second
 - Default Redis Cloud account payment method
 - TLS enabled
 - `noeviction`
+
+Essentials is still available for smaller demos by setting:
+
+```sh
+terraform plan -var='subscription_type=essentials'
+```
+
+Switching an existing Terraform-managed Essentials deployment to the default Pro/Flexible resource family will create Pro/Flexible resources and remove the Essentials resources from the same state. Export or reseed demo data before applying that change.
 
 ## Prerequisites
 

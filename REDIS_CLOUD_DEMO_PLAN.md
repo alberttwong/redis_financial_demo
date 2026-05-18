@@ -10,15 +10,17 @@ This file is documentation only. It does not create app code, Terraform resource
 
 ## Redis Cloud Terraform Provisioning
 
-Provision Redis Cloud with Terraform under a future `infra/redis-cloud` directory.
+Provision Redis Cloud with Terraform under `infra/redis-cloud`.
 
 Defaults:
 
 - Runtime target: Redis Cloud 8.4
-- Subscription type: Redis Cloud Essentials paid
+- Subscription type: Redis Cloud Pro/Flexible
 - Cloud provider and region: AWS `us-west-2`
 - Subscription name: `lpl-redis-demo`
 - Database name: `lpl-query-patterns`
+- Dataset size: 10 GB
+- Throughput sizing: 70,000 operations per second
 - Endpoint access: public endpoint for local demo development. Use the Terraform `redis_tls` output to decide whether the app should use `redis://` or `rediss://`.
 - Eviction policy: `noeviction`, unless a later benchmark explicitly tests cache-style eviction
 
@@ -29,7 +31,9 @@ REDISCLOUD_ACCESS_KEY
 REDISCLOUD_SECRET_KEY
 ```
 
-The Terraform configuration should discover or select an appropriate paid Essentials plan for AWS `us-west-2`. If Redis Cloud or the Terraform provider requires a plan ID, expose it as an override variable while keeping the default workflow account-driven.
+The Terraform configuration should use Redis Cloud Pro/Flexible resources by default with `dataset_size_in_gb = 10`, `throughput_measurement_by = "operations-per-second"`, and `throughput_measurement_value = 70000`. Essentials should remain available as an explicit smaller-demo override, but Pro/Flexible is the default target for the performance demo.
+
+Switching an existing Terraform-managed Essentials deployment to the default Pro/Flexible resource family creates Pro/Flexible resources and removes the Essentials resources from that state. Export or reseed demo data before applying that replacement.
 
 Expected Terraform outputs:
 
@@ -77,7 +81,7 @@ Batch loaders should use Redis pipelines with a configurable flush size, for exa
 
 ## Faker Data Generation
 
-Use `@faker-js/faker` in Node/TypeScript to generate synthetic LPL-style financial services data.
+Use `@faker-js/faker` in Node/TypeScript to generate synthetic LPL-style financial services data. Securities mimic an S&P 500-style equity universe with large-cap anchor companies, sector/industry metadata, exchange, and `index_name = "S&P 500"`.
 
 Generation should be deterministic when a seed is provided, so benchmark and demo runs can be reproduced.
 
@@ -101,7 +105,7 @@ The generator should maintain referential consistency:
 Document size targets:
 
 - Account Info: about 100KB per row by default
-- Security Info: configurable up to 100KB
+- Security Info: configurable up to 100KB, S&P 500-style equity rows
 - Position: configurable up to 400KB
 - Transaction: configurable up to 400KB
 
@@ -328,7 +332,7 @@ Unit and integration test coverage should include:
 - Redis Cloud is the only Redis runtime target.
 - Terraform provisions Redis Cloud infrastructure.
 - Terraform uses the Redis Cloud account's default payment method.
-- Redis Cloud Essentials paid in AWS `us-west-2` is the default target.
+- Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 10 GB dataset size, and 70,000 operations per second is the default target.
 - SQL remains the source of truth.
 - Redis receives batched table extracts, not streaming CDC, for this demo.
 - Account info documents are expected to be about 100KB and are returned in full for single-account reads.
