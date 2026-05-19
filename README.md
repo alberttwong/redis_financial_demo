@@ -8,13 +8,32 @@ GitHub repository: <https://github.com/alberttwong/redis_financial_demo>
 
 ```sh
 npm install
-cp .env.example .env.local
+cd infra/redis-cloud
+terraform init
+./terraform-with-creds.sh apply
+cd ../..
+{
+  printf 'REDIS_URL='
+  terraform -chdir=infra/redis-cloud output -raw redis_url
+  printf '\nREDIS_TLS='
+  terraform -chdir=infra/redis-cloud output -raw redis_tls
+  printf '\nREDIS_HOST='
+  terraform -chdir=infra/redis-cloud output -raw redis_host
+  printf '\nREDIS_PORT='
+  terraform -chdir=infra/redis-cloud output -raw redis_port
+  printf '\nREDIS_PASSWORD='
+  terraform -chdir=infra/redis-cloud output -raw redis_password
+  printf '\n'
+} > .env.local
+chmod 600 .env.local
 npm run redis:check
 npm run redis:indexes
 npm run seed:all
 npm run smoke
 npm run dev
 ```
+
+Node-based npm scripts load `.env.local` automatically. The memtier shell scripts use exported environment variables, so keep the `set -a; . ./.env.local; set +a` step shown in the load-test examples.
 
 Open <http://localhost:3000>.
 
@@ -242,7 +261,9 @@ MEMTIER_TRANSACTION_RATE_PER_CONNECTION=300
 
 ## Redis Cloud
 
-Redis Cloud credentials are read from environment variables. Use the Terraform `redis_url` and `redis_tls` outputs for the exact protocol of the provisioned database.
+Terraform for Redis Cloud lives in `infra/redis-cloud`. Run it through `./terraform-with-creds.sh` so the Redis Cloud API keys are loaded from 1Password first, with exported `REDISCLOUD_ACCESS_KEY` and `REDISCLOUD_SECRET_KEY` as the fallback.
+
+Use the Terraform `redis_url`, `redis_tls`, `redis_host`, `redis_port`, and `redis_password` outputs to build the ignored local `.env.local`. `redis_url` and `redis_password` are sensitive outputs; write them to the file rather than printing them in shared logs.
 
 The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 10 GB dataset size, and throughput sizing set to 70,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
 
@@ -267,7 +288,7 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.
 - The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 10 GB dataset size, and 70,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.
-- The earlier provisioned Essentials database reported `redis_tls=false`; use the Terraform `redis_tls` output rather than assuming TLS mode.
+- Use the Terraform `redis_tls` output rather than assuming TLS mode; Pro/Flexible and Essentials deployments can differ.
 - Local `.env.local`, Terraform state, generated plan files, `.next`, `node_modules`, and benchmark outputs are intentionally ignored by git.
 - The Redis Cloud API keys previously used for provisioning should be rotated after the environment is stable.
 
