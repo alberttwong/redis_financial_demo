@@ -25,19 +25,32 @@ Switching an existing Terraform-managed Essentials deployment to the default Pro
 
 ## Prerequisites
 
-Set Redis Cloud API credentials:
+Store Redis Cloud API credentials in 1Password, or export them in your shell.
+The wrapper script loads credentials from 1Password first and falls back to
+exported environment variables.
 
 ```sh
+op item create \
+  --vault Redis \
+  --category "API Credential" \
+  --title "LPL Redis Cloud Terraform" \
+  REDISCLOUD_ACCESS_KEY[password]=... \
+  REDISCLOUD_SECRET_KEY[password]=...
+
 export REDISCLOUD_ACCESS_KEY=...
 export REDISCLOUD_SECRET_KEY=...
 ```
+
+To use a different 1Password location, set `REDISCLOUD_OP_VAULT` and
+`REDISCLOUD_OP_ITEM`. To skip 1Password lookup, set
+`REDISCLOUD_USE_1PASSWORD=0`.
 
 ## Provision
 
 ```sh
 terraform init
-terraform plan
-terraform apply
+./terraform-with-creds.sh plan
+./terraform-with-creds.sh apply
 ```
 
 Terraform creates paid Redis Cloud resources. Use `terraform destroy` when the demo database is no longer needed.
