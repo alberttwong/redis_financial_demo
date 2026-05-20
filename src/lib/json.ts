@@ -6,11 +6,23 @@ export async function jsonSet(client: RedisClientType, key: string, value: unkno
 
 export async function jsonGet<T>(client: RedisClientType, key: string): Promise<T | null> {
   const raw = await client.sendCommand(["JSON.GET", key, "$"]);
-  if (!raw || typeof raw !== "string") return null;
-  const parsed = JSON.parse(raw) as T[];
-  return parsed[0] ?? null;
+  return parseJsonGetReply<T>(raw);
 }
 
 export async function jsonMGet<T>(client: RedisClientType, keys: string[]): Promise<Array<T | null>> {
-  return Promise.all(keys.map((key) => jsonGet<T>(client, key)));
+  if (keys.length === 0) return [];
+
+  const pipeline = client.multi();
+  for (const key of keys) {
+    pipeline.addCommand(["JSON.GET", key, "$"]);
+  }
+
+  const raw = await pipeline.execAsPipeline();
+  return raw.map((value) => parseJsonGetReply<T>(value));
+}
+
+function parseJsonGetReply<T>(value: unknown): T | null {
+  if (!value || typeof value !== "string") return null;
+  const parsed = JSON.parse(value) as T[];
+  return parsed[0] ?? null;
 }

@@ -28,7 +28,7 @@ cd ../..
 chmod 600 .env.local
 npm run redis:check
 npm run redis:indexes
-npm run seed:all
+npm run seed:initial-load
 npm run smoke
 npm run dev
 ```
@@ -131,7 +131,7 @@ Redis key mapping:
 | `securities` | `sec:{security_id}:info` | Direct lookup or search by `security_no` |
 | `positions` | `pos:{account_id}:{security_no}:{acct_type_code}` | Composite lookup or search by `account_id` |
 | `transactions` | `txn:{account_id}:{security_id}:{trade_date}:{acct_type_code}` | Composite lookup, search by `account_id`, `security_id`, or both |
-| `account_snapshots` | `acct:{account_id}:snapshot` | One-key hot read model for account join views |
+| `account_snapshots` | `acct-snapshot:{account_id}` | One-key hot read model for account join views |
 
 ## Data Flows
 
@@ -236,7 +236,7 @@ cp .env.initial-load.example .env.initial-load
 npm run seed:initial-load
 ```
 
-`seed:initial-load` sources `.env.local` and `.env.initial-load` for you, prints the active load shape, and then runs `seed.ts all`.
+`seed:initial-load` sources `.env.local` and `.env.initial-load` for you, prints the active load shape, and then runs the full seeding sequence.
 
 ### Base Data First
 
@@ -321,9 +321,9 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Initial load generates 1,000 accounts and 1,000 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
 - With the default initial-load profile, 1,000 accounts produces 8,000 positions, 10,000 random transactions across the account population, and 1,000 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
 - In a typical stock trading scenario, `transactions` are the incoming change/history records and `positions` are derived current or as-of holdings.
-- Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` to hydrate related JSON rows.
+- Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` commands to hydrate related JSON rows across Redis Cluster slots.
 - Redis is not used as a relational SQL join planner.
-- Hot account-level join reads should use materialized Redis JSON read models such as `acct:{account_id}:snapshot`.
+- Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
 - The primary load test target is 60,000 transaction-data operations per second.
 - The trade-write load test randomly selects accounts and securities, generates transaction JSON rows, and writes them with `JSON.SET txn:... $ ...`.
 - `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.

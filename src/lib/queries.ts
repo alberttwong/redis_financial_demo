@@ -84,7 +84,7 @@ export async function securityByNo(ctx: QueryContext, securityNo: string): Promi
   const data = hydrate.value.filter((row): row is SecurityRow => Boolean(row));
   return response(startedAt, data, timing, data.length, [
     `FT.SEARCH ${INDEXES.securities} "${query}" NOCONTENT LIMIT 0 20 DIALECT 2`,
-    "JSON.GET <matched-security-key> $"
+    "JSON.GET <matched-security-keys> $ (pipelined)"
   ]);
 }
 
@@ -114,7 +114,7 @@ export async function positionsByAccount(ctx: QueryContext, accountId: string): 
   const data = hydrate.value.filter((row): row is PositionRow => Boolean(row));
   return response(startedAt, data, timing, data.length, [
     `FT.SEARCH ${INDEXES.positions} "${query}" NOCONTENT LIMIT 0 500 DIALECT 2`,
-    "JSON.GET <matched-position-key> $"
+    "JSON.GET <matched-position-keys> $ (pipelined)"
   ]);
 }
 
@@ -153,7 +153,7 @@ export async function transactionsSearch(
   const data = hydrate.value.filter((row): row is TransactionRow => Boolean(row));
   return response(startedAt, data, timing, data.length, [
     `FT.SEARCH ${INDEXES.transactions} "${query}" NOCONTENT LIMIT 0 ${limit} DIALECT 2`,
-    "JSON.GET <matched-transaction-key> $"
+    "JSON.GET <matched-transaction-keys> $ (pipelined)"
   ]);
 }
 
@@ -192,7 +192,7 @@ export async function accountPortfolioJoin(ctx: QueryContext, accountId: string)
     `JSON.GET ${accountKey(accountId)} $`,
     `FT.SEARCH ${INDEXES.positions} "${tagEquals("account_id", accountId)}" NOCONTENT LIMIT 0 500 DIALECT 2`,
     `FT.SEARCH ${INDEXES.securities} "@security_no:{...}" NOCONTENT LIMIT 0 1 DIALECT 2`,
-    "JSON.GET <matched-position-and-security-keys> $"
+    "JSON.GET <matched-position-and-security-keys> $ (pipelined)"
   ]);
 }
 
@@ -224,7 +224,7 @@ export async function accountActivityJoin(ctx: QueryContext, accountId: string):
   return response(startedAt, join.value, timing, transactions.result_count, [
     `JSON.GET ${accountKey(accountId)} $`,
     `FT.SEARCH ${INDEXES.transactions} "${tagEquals("account_id", accountId)}" NOCONTENT LIMIT 0 100 DIALECT 2`,
-    "JSON.GET <matched-transaction-and-security-keys> $"
+    "JSON.GET <matched-transaction-and-security-keys> $ (pipelined)"
   ]);
 }
 

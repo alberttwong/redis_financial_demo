@@ -16,7 +16,6 @@
     "seed:positions": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts positions",
     "seed:transactions": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts transactions",
     "seed:snapshots": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts snapshots",
-    "seed:all": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts all",
     "seed:initial-load": "bash scripts/seed-initial-load.sh",
     "smoke": "node --env-file-if-exists=.env.local --import tsx scripts/smoke.ts",
     "bench:prepare": "node --env-file-if-exists=.env.local --import tsx scripts/write-memtier-monitor.ts",

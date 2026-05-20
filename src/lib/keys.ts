@@ -33,5 +33,5 @@ export function transactionKey(
 }
 
 export function snapshotKey(accountId: string): string {
-  return `acct:${accountId}:snapshot`;
+  return `acct-snapshot:${accountId}`;
 }
