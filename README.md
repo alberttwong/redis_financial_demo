@@ -33,7 +33,7 @@ npm run smoke
 npm run dev
 ```
 
-Node-based npm scripts load `.env.local` automatically. The memtier shell scripts use exported environment variables, so keep the `set -a; . ./.env.local; set +a` step shown in the load-test examples.
+Node-based npm scripts and memtier shell wrappers load `.env.local` automatically. The memtier wrappers also load `.env.initial-load` when it exists, so benchmark tuning can live beside the initial-load profile.
 
 Open <http://localhost:3000>.
 
@@ -193,13 +193,21 @@ flowchart LR
 
 ## Load Testing
 
-The primary load test target is **60,000 transaction-data operations per second**.
+The primary load test target is **60,000 transaction-data operations per second**. Install `memtier_benchmark` first if it is not already on `PATH`.
 
 ```sh
-set -a; . ./.env.local; set +a
+brew install memtier_benchmark
 npm run bench:prepare
 npm run bench:transactions
 ```
+
+The transaction benchmark runs for 60 seconds by default. To make the duration explicit:
+
+```sh
+MEMTIER_TEST_TIME=60 npm run bench:transactions
+```
+
+The benchmark wrappers load `.env.local` and derive `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, and `REDIS_TLS` from `REDIS_URL`, so the connection string remains the source of truth for memtier runs. For TLS Redis Cloud endpoints, the wrappers pass `--tls-skip-verify` by default because macOS memtier builds may not use the system Keychain CA store. Set `MEMTIER_TLS_CACERT=/path/to/ca-bundle.pem` to verify with an explicit CA bundle instead.
 
 `bench:prepare` writes `monitor-input/transactions.txt`. When `REDIS_URL` is available, it pulls real transaction keys from Redis and writes `JSON.GET txn:... $` commands. Without Redis access, it falls back to transaction-index searches with `FT.SEARCH idx:transactions`.
 
@@ -217,13 +225,45 @@ MEMTIER_TRANSACTION_RATE_PER_CONNECTION=300
 
 ## Initial Load Profile
 
-The initial load profile generates **1,000 accounts**:
+The initial load profile generates **1,000 accounts**. The seeder writes base JSON rows first, creates or verifies Redis Query Engine indexes after the base load, then builds account snapshots with bounded concurrency.
+
+### Full Initial Load
 
 ```sh
 cp .env.initial-load.example .env.initial-load
-set -a; . ./.env.local; . ./.env.initial-load; set +a
 npm run seed:initial-load
 ```
+
+`seed:initial-load` sources `.env.local` and `.env.initial-load` for you, prints the active load shape, and then runs `seed.ts all`.
+
+### Base Data First
+
+For the fastest base-data load, skip materialized snapshots first:
+
+```sh
+cp .env.initial-load.example .env.initial-load
+perl -0pi -e 's/SEED_SKIP_SNAPSHOTS=false/SEED_SKIP_SNAPSHOTS=true/' .env.initial-load
+npm run seed:initial-load
+```
+
+Build snapshots later when you need the account read models:
+
+```sh
+set -a; . ./.env.local; . ./.env.initial-load; set +a
+npm run seed:snapshots
+```
+
+Useful tuning knobs in `.env.initial-load`:
+
+```text
+SEED_BATCH_SIZE=500
+SEED_SNAPSHOT_CONCURRENCY=25
+SEED_SKIP_SNAPSHOTS=false
+```
+
+Higher `SEED_BATCH_SIZE` can improve throughput but also raises local memory and in-flight command pressure. Higher `SEED_SNAPSHOT_CONCURRENCY` reduces snapshot wall-clock time until Redis Cloud or network latency becomes the bottleneck.
+
+The fastest full load is from a machine close to Redis Cloud, for example a temporary runner or VM in AWS `us-west-2`; the 100KB account rows make laptop-to-cloud latency visible. Deferring index creation helps most on a fresh database. If indexes already exist, Redis still maintains them during base writes.
 
 This profile expands to:
 
@@ -242,7 +282,6 @@ At 100KB per account, the account table alone is about 97.66 MiB before Redis JS
 The trade-write workload randomly selects accounts and securities from the configured seed population, generates transaction JSON rows, and drives them through Redis as `JSON.SET txn:... $ ...` commands. With the initial-load profile, trades are distributed across 1,000 accounts and 1,000 securities.
 
 ```sh
-set -a; . ./.env.local; . ./.env.initial-load; set +a
 npm run bench:prepare
 npm run bench:trade-writes
 ```
@@ -277,8 +316,8 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Account Info documents are expected to be about 100KB and single-account reads return the full JSON document.
 - Security Info documents are configurable up to 100KB and mimic S&P 500-style equity constituents with sector, industry, exchange, and index membership metadata.
 - Position and Transaction documents are configurable up to 400KB, but the default demo payloads are smaller to fit the current Redis Cloud demo database.
-- Initial load generates 1,000 accounts and 1,000 securities.
-- With the default initial-load profile, 1,000 accounts produces 8,000 positions, 10,000 random transactions across the account population, and 1,000 materialized account snapshots.
+- Initial load generates 1,000 accounts and 1,000 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
+- With the default initial-load profile, 1,000 accounts produces 8,000 positions, 10,000 random transactions across the account population, and 1,000 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
 - In a typical stock trading scenario, `transactions` are the incoming change/history records and `positions` are derived current or as-of holdings.
 - Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` to hydrate related JSON rows.
 - Redis is not used as a relational SQL join planner.

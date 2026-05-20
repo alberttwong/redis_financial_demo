@@ -9,6 +9,10 @@ const registrationTypes = ["INDIVIDUAL", "JOINT", "CUSTODIAL", "TRUST", "CORPORA
 const acctTypeCodes = ["CASH", "MARGIN", "RETIREMENT", "ADVISORY"];
 const transactionTypes = ["BUY", "SELL", "DIVIDEND", "INTEREST", "TRANSFER", "FEE"];
 
+type AccountRef = Pick<AccountRow, "account_id">;
+type PositionSecurityRef = Pick<SecurityRow, "security_no">;
+type TransactionSecurityRef = Pick<SecurityRow, "security_id">;
+
 export function seedFaker(seed: number): void {
   faker.seed(seed);
 }
@@ -55,7 +59,7 @@ export function makeSecurity(index: number, targetBytes: number): SecurityRow {
   );
 }
 
-export function makePosition(account: AccountRow, security: SecurityRow, targetBytes: number): PositionRow {
+export function makePosition(account: AccountRef, security: PositionSecurityRef, targetBytes: number): PositionRow {
   const acctTypeCode = faker.helpers.arrayElement(acctTypeCodes);
   const quantity = faker.number.float({ min: 1, max: 4_000, fractionDigits: 4 });
   const marketValue = faker.number.float({ min: 500, max: 750_000, fractionDigits: 2 });
@@ -75,7 +79,7 @@ export function makePosition(account: AccountRow, security: SecurityRow, targetB
   );
 }
 
-export function makeTransaction(account: AccountRow, security: SecurityRow, targetBytes: number): TransactionRow {
+export function makeTransaction(account: AccountRef, security: TransactionSecurityRef, targetBytes: number): TransactionRow {
   const acctTypeCode = faker.helpers.arrayElement(acctTypeCodes);
   const tradeDate = faker.date.recent({ days: 365 }).toISOString().slice(0, 10);
   const quantity = faker.number.float({ min: 0.01, max: 2_000, fractionDigits: 4 });

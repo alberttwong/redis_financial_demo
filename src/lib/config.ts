@@ -14,6 +14,9 @@ export type SeedConfig = {
   securityBytes: number;
   positionBytes: number;
   transactionBytes: number;
+  batchSize: number;
+  snapshotConcurrency: number;
+  skipSnapshots: boolean;
   randomSeed: number;
 };
 
@@ -21,7 +24,13 @@ function readInt(name: string, fallback: number): number {
   const value = process.env[name];
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : fallback;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readBool(name: string, fallback = false): boolean {
+  const value = process.env[name];
+  if (!value) return fallback;
+  return ["1", "true", "yes", "y"].includes(value.toLowerCase());
 }
 
 export function getRedisConfig(): RedisConfig {
@@ -48,6 +57,9 @@ export function getSeedConfig(): SeedConfig {
     securityBytes: readInt("SEED_SECURITY_BYTES", 8_192),
     positionBytes: readInt("SEED_POSITION_BYTES", 8_192),
     transactionBytes: readInt("SEED_TRANSACTION_BYTES", 8_192),
+    batchSize: readInt("SEED_BATCH_SIZE", 500),
+    snapshotConcurrency: readInt("SEED_SNAPSHOT_CONCURRENCY", 25),
+    skipSnapshots: readBool("SEED_SKIP_SNAPSHOTS"),
     randomSeed: readInt("SEED_RANDOM", 20_260_518)
   };
 }

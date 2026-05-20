@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck disable=SC1091
+. ./scripts/load-redis-env.sh
+
 : "${REDIS_HOST:?REDIS_HOST is required}"
 : "${REDIS_PORT:?REDIS_PORT is required}"
 : "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
@@ -10,6 +13,11 @@ mkdir -p memtier-output
 tls_args=()
 if [[ "${REDIS_TLS:-false}" == "true" ]]; then
   tls_args+=(--tls)
+  if [[ -n "${MEMTIER_TLS_CACERT:-}" ]]; then
+    tls_args+=(--cacert "${MEMTIER_TLS_CACERT}")
+  elif [[ "${MEMTIER_TLS_SKIP_VERIFY:-true}" == "true" ]]; then
+    tls_args+=(--tls-skip-verify)
+  fi
 fi
 
 memtier_benchmark \

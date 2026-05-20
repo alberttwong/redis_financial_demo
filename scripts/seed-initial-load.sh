@@ -38,6 +38,9 @@ Initial load profile:
   positions: $(( SEED_ACCOUNTS * SEED_POSITIONS_PER_ACCOUNT ))
   transactions: ${SEED_TRANSACTIONS}
   account payload only: ${account_gib} GiB before Redis/index overhead
+  batch size: ${SEED_BATCH_SIZE:-500}
+  snapshot concurrency: ${SEED_SNAPSHOT_CONCURRENCY:-25}
+  skip snapshots: ${SEED_SKIP_SNAPSHOTS:-false}
 
 EOF
 
