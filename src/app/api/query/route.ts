@@ -43,7 +43,7 @@ async function runPattern(
 ) {
   const accountId = params.get("account_id") ?? "A00000001";
   const securityId = params.get("security_id") ?? "SEC00000001";
-  const securityNo = params.get("security_no") ?? "SNO00000001";
+  const securityNo = params.get("security_no") ?? "SPX000001";
   const acctTypeCode = params.get("acct_type_code") ?? "CASH";
   const tradeDate = params.get("trade_date") ?? new Date().toISOString().slice(0, 10);
   const limit = Number.parseInt(params.get("limit") ?? "100", 10);

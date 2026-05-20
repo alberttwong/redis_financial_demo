@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type Pattern = {
   id: string;
@@ -23,6 +23,14 @@ type QueryResult = {
   error?: string;
 };
 
+type QuerySamples = {
+  account_id: string;
+  security_id: string;
+  security_no: string;
+  acct_type_code: string;
+  trade_date: string;
+};
+
 const patterns: Pattern[] = [
   { id: "accountById", label: "Account by ID", group: "Primary" },
   { id: "securityById", label: "Security by ID", group: "Primary" },
@@ -42,7 +50,7 @@ export default function Home() {
   const [pattern, setPattern] = useState("accountById");
   const [accountId, setAccountId] = useState("A00000001");
   const [securityId, setSecurityId] = useState("SEC00000001");
-  const [securityNo, setSecurityNo] = useState("SNO00000001");
+  const [securityNo, setSecurityNo] = useState("SPX000001");
   const [acctTypeCode, setAcctTypeCode] = useState("CASH");
   const [tradeDate, setTradeDate] = useState(new Date().toISOString().slice(0, 10));
   const [limit, setLimit] = useState("100");
@@ -50,6 +58,31 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
 
   const selected = useMemo(() => patterns.find((item) => item.id === pattern) ?? patterns[0], [pattern]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSamples() {
+      try {
+        const response = await fetch("/api/samples", { cache: "no-store" });
+        const body = (await response.json()) as { samples?: QuerySamples };
+        if (cancelled || !body.samples) return;
+
+        setAccountId(body.samples.account_id);
+        setSecurityId(body.samples.security_id);
+        setSecurityNo(body.samples.security_no);
+        setAcctTypeCode(body.samples.acct_type_code);
+        setTradeDate(body.samples.trade_date);
+      } catch {
+        // Keep static fallbacks when Redis has not been seeded yet.
+      }
+    }
+
+    void loadSamples();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function runQuery() {
     setLoading(true);

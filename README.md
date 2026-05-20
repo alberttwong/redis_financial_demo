@@ -46,6 +46,8 @@ Open <http://localhost:3000>.
 - Runtime joins for account portfolios, account activity, security exposure, and transaction detail.
 - Materialized account snapshot lookup for hot join/read-model comparisons.
 
+On startup, the web workbench calls `/api/samples` to discover working seeded values for account, security, position, and transaction examples. This keeps secondary-index and composite-key examples from defaulting to IDs that do not exist in the current Redis Cloud dataset.
+
 ## Data Model
 
 The source system is SQL, so Redis stores one flat JSON document per logical SQL row. Base tables stay normalized; materialized snapshots are optional read models for hot account-level joins.

@@ -19,7 +19,7 @@ async function main() {
 
   const accountId = process.env.SMOKE_ACCOUNT_ID ?? "A00000001";
   const securityId = process.env.SMOKE_SECURITY_ID ?? "SEC00000001";
-  const securityNo = process.env.SMOKE_SECURITY_NO ?? "SNO00000001";
+  const securityNo = process.env.SMOKE_SECURITY_NO ?? "SPX000001";
 
   const checks = [
     ["accountById", () => accountById({ client }, accountId)],
