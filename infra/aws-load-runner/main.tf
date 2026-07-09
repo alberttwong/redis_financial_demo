@@ -86,6 +86,17 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
   description       = "SSH access to the benchmark runner"
 }
 
+resource "aws_vpc_security_group_ingress_rule" "web" {
+  for_each = toset(var.web_ingress_cidr_blocks)
+
+  security_group_id = aws_security_group.runner.id
+  cidr_ipv4         = each.value
+  from_port         = var.web_port
+  ip_protocol       = "tcp"
+  to_port           = var.web_port
+  description       = "HTTP access to the ad hoc query workbench"
+}
+
 resource "aws_vpc_security_group_egress_rule" "all" {
   security_group_id = aws_security_group.runner.id
   cidr_ipv4         = "0.0.0.0/0"

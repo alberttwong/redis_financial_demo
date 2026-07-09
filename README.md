@@ -194,7 +194,7 @@ flowchart LR
 
 ## Load Testing
 
-The primary load test target is **180,000 transaction-data operations per second**. Install `memtier_benchmark` first if it is not already on `PATH`.
+The primary load test target is **180,000 transaction-data operations per second**, split into **150,000 transaction reads/sec** and **30,000 trade writes/sec** when `bench:concurrent` runs. Install `memtier_benchmark` first if it is not already on `PATH`.
 
 ```sh
 brew install memtier_benchmark
@@ -217,9 +217,9 @@ The default target comes from:
 ```text
 MEMTIER_THREADS=4
 MEMTIER_CLIENTS=50
-MEMTIER_TRANSACTION_RATE_PER_CONNECTION=900
+MEMTIER_TRANSACTION_RATE_PER_CONNECTION=750
 
-4 * 50 * 900 = 180,000 transaction-data ops/sec
+4 * 50 * 750 = 150,000 transaction reads/sec
 ```
 
 `MEMTIER_PIPELINE=16` helps keep requests in flight, but it is not part of the target-rate multiplication.
@@ -233,7 +233,8 @@ cd infra/aws-load-runner
 terraform init
 terraform apply \
   -var='key_name=<your-ec2-key-pair>' \
-  -var='ssh_ingress_cidr_blocks=["<your-public-ip>/32"]'
+  -var='ssh_ingress_cidr_blocks=["<your-public-ip>/32"]' \
+  -var='web_ingress_cidr_blocks=["<your-public-ip>/32"]'
 ```
 
 Then run the benchmark from the repo root:
@@ -242,7 +243,7 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, `bench:transactions`, and `bench:trade-writes`, redacts the memtier auth field, and downloads results to `memtier-output/aws-load-runner/`.
+The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, starts the Next.js query workbench on port `3000`, then runs `bench:transactions` and `bench:trade-writes` concurrently through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
 
 ## Initial Load Profile
 
@@ -309,17 +310,17 @@ npm run bench:prepare
 npm run bench:trade-writes
 ```
 
-The target is still:
+The target is:
 
 ```text
 MEMTIER_THREADS=4
 MEMTIER_CLIENTS=50
-MEMTIER_TRADE_RATE_PER_CONNECTION=300
+MEMTIER_TRADE_RATE_PER_CONNECTION=150
 
-4 * 50 * 300 = 60,000 trade writes/sec
+4 * 50 * 150 = 30,000 trade writes/sec
 ```
 
-`MEMTIER_TRADE_COMMANDS` controls how many unique trade commands are generated into `monitor-input/trade-writes.txt`. The default is `10,000`; memtier replays the file at the configured target rate.
+Trade writes use memtier-generated keys with a run-specific `txn:load:<run-id>:` prefix and parallel sequential key allocation, so each write operation creates a unique transaction key during the run instead of replaying a fixed monitor-input slice. `MEMTIER_TRADE_RUN_ID`, `MEMTIER_TRADE_KEY_MAXIMUM`, and `MEMTIER_TRADE_PAYLOAD_BYTES` tune the generated key space and JSON payload size.
 
 ## Redis Cloud
 
@@ -345,8 +346,8 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` commands to hydrate related JSON rows across Redis Cluster slots.
 - Redis is not used as a relational SQL join planner.
 - Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
-- The primary load test target is 180,000 transaction-data operations per second.
-- The trade-write load test randomly selects accounts and securities, generates transaction JSON rows, and writes them with `JSON.SET txn:... $ ...`.
+- The primary load test target is 180,000 transaction-data operations per second, split into 150,000 transaction reads/sec and 30,000 trade writes/sec.
+- The trade-write load test writes unique transaction keys under `txn:load:<run-id>:` with `JSON.SET`.
 - `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.
 - The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 300 GB dataset size, and 180,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.

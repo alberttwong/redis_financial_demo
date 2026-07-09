@@ -22,3 +22,8 @@ output "ready_check" {
   description = "Command to check bootstrap status on the runner."
   value       = "ssh ec2-user@${aws_instance.runner.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"
 }
+
+output "web_url" {
+  description = "Ad hoc query workbench URL when web_ingress_cidr_blocks allows access."
+  value       = "http://${aws_instance.runner.public_dns}:${var.web_port}"
+}

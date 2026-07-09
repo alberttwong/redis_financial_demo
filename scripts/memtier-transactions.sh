@@ -28,7 +28,7 @@ memtier_benchmark \
   --threads "${MEMTIER_THREADS:-4}" \
   --clients "${MEMTIER_CLIENTS:-50}" \
   --pipeline "${MEMTIER_PIPELINE:-16}" \
-  --rate-limiting "${MEMTIER_TRANSACTION_RATE_PER_CONNECTION:-900}" \
+  --rate-limiting "${MEMTIER_TRANSACTION_RATE_PER_CONNECTION:-750}" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
   --command "__monitor_line@__" \
   --monitor-input monitor-input/transactions.txt \

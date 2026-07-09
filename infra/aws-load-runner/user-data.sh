@@ -2,7 +2,7 @@
 set -euxo pipefail
 
 dnf update -y
-dnf install -y \
+dnf install -y --allowerasing \
   autoconf \
   automake \
   curl \

@@ -28,6 +28,18 @@ variable "ssh_ingress_cidr_blocks" {
   default     = []
 }
 
+variable "web_ingress_cidr_blocks" {
+  description = "CIDR blocks allowed to reach the ad hoc query workbench on web_port. Leave empty to keep the website private."
+  type        = list(string)
+  default     = []
+}
+
+variable "web_port" {
+  description = "Port exposed by Next.js for the ad hoc query workbench."
+  type        = number
+  default     = 3000
+}
+
 variable "subnet_id" {
   description = "Optional public subnet ID. Defaults to the first public subnet in the default VPC."
   type        = string
