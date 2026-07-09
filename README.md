@@ -224,6 +224,26 @@ MEMTIER_TRANSACTION_RATE_PER_CONNECTION=900
 
 `MEMTIER_PIPELINE=16` helps keep requests in flight, but it is not part of the target-rate multiplication.
 
+### AWS us-west-2 Runner
+
+For a cleaner Redis Cloud benchmark, run memtier from AWS `us-west-2` near the database instead of from a laptop:
+
+```sh
+cd infra/aws-load-runner
+terraform init
+terraform apply \
+  -var='key_name=<your-ec2-key-pair>' \
+  -var='ssh_ingress_cidr_blocks=["<your-public-ip>/32"]'
+```
+
+Then run the benchmark from the repo root:
+
+```sh
+AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
+```
+
+The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, `bench:transactions`, and `bench:trade-writes`, redacts the memtier auth field, and downloads results to `memtier-output/aws-load-runner/`.
+
 ## Initial Load Profile
 
 The initial load profile generates **5,000 accounts**. The seeder writes base JSON rows first, creates or verifies Redis Query Engine indexes after the base load, then builds account snapshots with bounded concurrency.
