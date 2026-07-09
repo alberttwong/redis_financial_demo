@@ -14,7 +14,9 @@ export type SeedConfig = {
   positionBytes: number;
   transactionBytes: number;
   batchSize: number;
+  writeConcurrency: number;
   snapshotConcurrency: number;
+  dropIndexesBeforeLoad: boolean;
   skipSnapshots: boolean;
   randomSeed: number;
 };
@@ -57,7 +59,9 @@ export function getSeedConfig(): SeedConfig {
     positionBytes: readInt("SEED_POSITION_BYTES", 8_192),
     transactionBytes: readInt("SEED_TRANSACTION_BYTES", 8_192),
     batchSize: readInt("SEED_BATCH_SIZE", 500),
+    writeConcurrency: readInt("SEED_WRITE_CONCURRENCY", 4),
     snapshotConcurrency: readInt("SEED_SNAPSHOT_CONCURRENCY", 25),
+    dropIndexesBeforeLoad: readBool("SEED_DROP_INDEXES_BEFORE_LOAD"),
     skipSnapshots: readBool("SEED_SKIP_SNAPSHOTS"),
     randomSeed: readInt("SEED_RANDOM", 20_260_518)
   };

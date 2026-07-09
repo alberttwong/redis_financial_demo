@@ -257,12 +257,14 @@ npm run seed:snapshots
 Useful tuning knobs in `.env.initial-load`:
 
 ```text
-SEED_BATCH_SIZE=500
+SEED_BATCH_SIZE=2000
+SEED_WRITE_CONCURRENCY=8
 SEED_SNAPSHOT_CONCURRENCY=25
+SEED_DROP_INDEXES_BEFORE_LOAD=true
 SEED_SKIP_SNAPSHOTS=false
 ```
 
-Higher `SEED_BATCH_SIZE` can improve throughput but also raises local memory and in-flight command pressure. Higher `SEED_SNAPSHOT_CONCURRENCY` reduces snapshot wall-clock time until Redis Cloud or network latency becomes the bottleneck.
+Bulk writes use Redis pipelines per batch and keep up to `SEED_WRITE_CONCURRENCY` batches in flight. Higher `SEED_BATCH_SIZE` and `SEED_WRITE_CONCURRENCY` can improve throughput but also raise local memory, socket-buffer, and Redis write pressure. `SEED_DROP_INDEXES_BEFORE_LOAD=true` drops Redis Query Engine indexes before the base row load and recreates them afterward, avoiding per-row index maintenance during bulk load. Higher `SEED_SNAPSHOT_CONCURRENCY` reduces snapshot wall-clock time until Redis Cloud or network latency becomes the bottleneck.
 
 The fastest full load is from a machine close to Redis Cloud, for example a temporary runner or VM in AWS `us-west-2`; larger security, position, transaction, and snapshot rows can make laptop-to-cloud latency visible. Deferring index creation helps most on a fresh database. If indexes already exist, Redis still maintains them during base writes.
 

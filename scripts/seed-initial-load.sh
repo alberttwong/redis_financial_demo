@@ -37,7 +37,9 @@ Initial load profile:
   snapshots: ${SEED_ACCOUNTS}
   account payload: disabled
   batch size: ${SEED_BATCH_SIZE:-500}
+  write concurrency: ${SEED_WRITE_CONCURRENCY:-4}
   snapshot concurrency: ${SEED_SNAPSHOT_CONCURRENCY:-25}
+  drop indexes before load: ${SEED_DROP_INDEXES_BEFORE_LOAD:-false}
   skip snapshots: ${SEED_SKIP_SNAPSHOTS:-false}
 
 EOF

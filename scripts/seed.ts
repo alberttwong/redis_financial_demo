@@ -1,7 +1,7 @@
 import { faker } from "@faker-js/faker";
 import { performance } from "node:perf_hooks";
-import { createIndexes } from "../src/lib/indexes";
-import { jsonGet, jsonMGet, jsonSet } from "../src/lib/json";
+import { createIndexes, dropIndexes } from "../src/lib/indexes";
+import { jsonGet, jsonMGet, jsonSet, jsonSetCommand } from "../src/lib/json";
 import { getSeedConfig } from "../src/lib/config";
 import {
   makeAccount,
@@ -20,6 +20,14 @@ type AccountRef = Pick<AccountRow, "account_id">;
 type SecurityRef = Pick<SecurityRow, "security_id" | "security_no">;
 type SeedTask = [SeedTarget, () => Promise<number>];
 type RedisRow = { key: string; value: unknown };
+type BatchWriteState = {
+  label: string;
+  total: number;
+  concurrency: number;
+  pending: Array<Promise<number>>;
+  written: number;
+  lastProgressAt: number;
+};
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return Math.round(ms) + "ms";
@@ -40,28 +48,58 @@ async function timeTask<T>(name: string, task: () => Promise<T>): Promise<T> {
 }
 
 async function writeBatch(label: string, rows: RedisRow[], batchSize = getSeedConfig().batchSize): Promise<number> {
-  let written = 0;
-  let lastProgressAt = performance.now();
+  const config = getSeedConfig();
+  const state = createBatchWriteState(label, rows.length, config.writeConcurrency);
 
-  console.log(label + ": writing " + rows.length + " rows in batches of " + batchSize);
+  console.log(label + ": writing " + rows.length + " rows in batches of " + batchSize + " with concurrency " + state.concurrency);
   for (let offset = 0; offset < rows.length; offset += batchSize) {
-    const batch = rows.slice(offset, offset + batchSize);
-    await writeRows(batch);
-    written += batch.length;
-
-    const now = performance.now();
-    if (written === rows.length || now - lastProgressAt >= 5000) {
-      console.log(label + ": wrote " + written + "/" + rows.length);
-      lastProgressAt = now;
-    }
+    await queueRows(state, rows.slice(offset, offset + batchSize));
   }
 
-  return written;
+  return finishQueuedRows(state);
 }
 
 async function writeRows(rows: RedisRow[]): Promise<void> {
   const client = await getRedisClient();
-  await Promise.all(rows.map((row) => jsonSet(client, row.key, row.value)));
+  const pipeline = client.multi();
+  for (const row of rows) {
+    pipeline.addCommand(jsonSetCommand(row.key, row.value));
+  }
+  await pipeline.execAsPipeline();
+}
+
+function createBatchWriteState(label: string, total: number, concurrency: number): BatchWriteState {
+  return {
+    label,
+    total,
+    concurrency: Math.max(1, concurrency),
+    pending: [],
+    written: 0,
+    lastProgressAt: performance.now()
+  };
+}
+
+async function queueRows(state: BatchWriteState, batch: RedisRow[]): Promise<void> {
+  if (batch.length === 0) return;
+
+  state.pending.push(writeRows(batch).then(() => batch.length));
+  if (state.pending.length >= state.concurrency) {
+    await waitForOldestBatch(state);
+  }
+}
+
+async function finishQueuedRows(state: BatchWriteState): Promise<number> {
+  while (state.pending.length > 0) {
+    await waitForOldestBatch(state);
+  }
+  return state.written;
+}
+
+async function waitForOldestBatch(state: BatchWriteState): Promise<void> {
+  const write = state.pending.shift();
+  if (!write) return;
+  state.written += await write;
+  state.lastProgressAt = logWriteProgress(state.label, state.written, state.total, state.lastProgressAt);
 }
 
 function logWriteProgress(label: string, written: number, total: number, lastProgressAt: number): number {
@@ -124,10 +162,10 @@ async function seedPositions(): Promise<number> {
   const securities = makeSecurityRefs();
   const total = accounts.length * config.positionsPerAccount;
   const batch: RedisRow[] = [];
+  const state = createBatchWriteState("positions", total, config.writeConcurrency);
   let written = 0;
-  let lastProgressAt = performance.now();
 
-  console.log("positions: writing " + total + " rows in batches of " + config.batchSize);
+  console.log("positions: writing " + total + " rows in batches of " + config.batchSize + " with concurrency " + state.concurrency);
   for (const [accountIndex, account] of accounts.entries()) {
     for (let offset = 0; offset < config.positionsPerAccount; offset += 1) {
       const security = securities[(accountIndex * config.positionsPerAccount + offset) % securities.length];
@@ -138,20 +176,16 @@ async function seedPositions(): Promise<number> {
       });
 
       if (batch.length >= config.batchSize) {
-        await writeRows(batch);
-        written += batch.length;
-        batch.length = 0;
-        lastProgressAt = logWriteProgress("positions", written, total, lastProgressAt);
+        await queueRows(state, batch.splice(0));
       }
     }
   }
 
   if (batch.length > 0) {
-    await writeRows(batch);
-    written += batch.length;
-    lastProgressAt = logWriteProgress("positions", written, total, lastProgressAt);
+    await queueRows(state, batch.splice(0));
   }
 
+  written = await finishQueuedRows(state);
   return written;
 }
 
@@ -160,10 +194,10 @@ async function seedTransactions(): Promise<number> {
   const accounts = makeAccountRefs();
   const securities = makeSecurityRefs();
   const batch: RedisRow[] = [];
+  const state = createBatchWriteState("transactions", config.transactionCount, config.writeConcurrency);
   let written = 0;
-  let lastProgressAt = performance.now();
 
-  console.log("transactions: writing " + config.transactionCount + " rows in batches of " + config.batchSize);
+  console.log("transactions: writing " + config.transactionCount + " rows in batches of " + config.batchSize + " with concurrency " + state.concurrency);
   for (let index = 0; index < config.transactionCount; index += 1) {
     const accountIndex = index % accounts.length;
     const sequence = Math.floor(index / accounts.length);
@@ -174,19 +208,15 @@ async function seedTransactions(): Promise<number> {
     batch.push({ key, value: transaction });
 
     if (batch.length >= config.batchSize) {
-      await writeRows(batch);
-      written += batch.length;
-      batch.length = 0;
-      lastProgressAt = logWriteProgress("transactions", written, config.transactionCount, lastProgressAt);
+      await queueRows(state, batch.splice(0));
     }
   }
 
   if (batch.length > 0) {
-    await writeRows(batch);
-    written += batch.length;
-    lastProgressAt = logWriteProgress("transactions", written, config.transactionCount, lastProgressAt);
+    await queueRows(state, batch.splice(0));
   }
 
+  written = await finishQueuedRows(state);
   return written;
 }
 
@@ -281,6 +311,12 @@ async function ensureIndexes(): Promise<void> {
   for (const result of results) console.log("indexes: " + result);
 }
 
+async function dropExistingIndexes(): Promise<void> {
+  const client = await getRedisClient();
+  const results = await dropIndexes(client);
+  for (const result of results) console.log("indexes: " + result);
+}
+
 async function runSeedTask(name: SeedTarget, task: () => Promise<number>): Promise<number> {
   return timeTask(name, async () => {
     const count = await task();
@@ -303,6 +339,10 @@ async function main() {
   ];
 
   if (target === "all") {
+    if (config.dropIndexesBeforeLoad) {
+      await timeTask("drop-indexes", dropExistingIndexes);
+    }
+
     for (const [name, task] of baseTasks) {
       await runSeedTask(name, task);
     }
