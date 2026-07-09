@@ -17,21 +17,18 @@ export function seedFaker(seed: number): void {
   faker.seed(seed);
 }
 
-export function makeAccount(index: number, targetBytes: number): AccountRow {
+export function makeAccount(index: number): AccountRow {
   const accountId = `A${String(index + 1).padStart(8, "0")}`;
-  return withSizedPayload(
-    {
-      _id: accountId,
-      account_id: accountId,
-      household_id: `HH${String(Math.floor(index / 3) + 1).padStart(7, "0")}`,
-      advisor_id: `ADV${String(faker.number.int({ min: 1, max: 9999 })).padStart(5, "0")}`,
-      account_type: faker.helpers.arrayElement(accountTypes),
-      registration_type: faker.helpers.arrayElement(registrationTypes),
-      status: faker.helpers.arrayElement(["ACTIVE", "ACTIVE", "ACTIVE", "RESTRICTED", "CLOSED"]),
-      opened_date: faker.date.past({ years: 18 }).toISOString().slice(0, 10)
-    },
-    targetBytes
-  );
+  return {
+    _id: accountId,
+    account_id: accountId,
+    household_id: `HH${String(Math.floor(index / 3) + 1).padStart(7, "0")}`,
+    advisor_id: `ADV${String(faker.number.int({ min: 1, max: 9999 })).padStart(5, "0")}`,
+    account_type: faker.helpers.arrayElement(accountTypes),
+    registration_type: faker.helpers.arrayElement(registrationTypes),
+    status: faker.helpers.arrayElement(["ACTIVE", "ACTIVE", "ACTIVE", "RESTRICTED", "CLOSED"]),
+    opened_date: faker.date.past({ years: 18 }).toISOString().slice(0, 10)
+  };
 }
 
 export function makeSecurity(index: number, targetBytes: number): SecurityRow {
@@ -95,6 +92,36 @@ export function makeTransaction(account: AccountRef, security: TransactionSecuri
       trade_date_epoch: Date.parse(`${tradeDate}T00:00:00.000Z`),
       acct_type_code: acctTypeCode,
       transaction_type: faker.helpers.arrayElement(transactionTypes),
+      quantity,
+      amount
+    },
+    targetBytes
+  );
+}
+
+export function makeTransactionForSequence(
+  account: AccountRef,
+  security: TransactionSecurityRef,
+  sequence: number,
+  securityCount: number,
+  targetBytes: number
+): TransactionRow {
+  const acctTypeCode = acctTypeCodes[sequence % acctTypeCodes.length];
+  const dateOffset = Math.floor(sequence / securityCount);
+  const tradeDate = new Date(Date.UTC(2026, 0, 1 - dateOffset)).toISOString().slice(0, 10);
+  const quantity = faker.number.float({ min: 0.01, max: 2_000, fractionDigits: 4 });
+  const amount = faker.number.float({ min: 10, max: 250_000, fractionDigits: 2 });
+  const id = transactionId(account.account_id, security.security_id, tradeDate, acctTypeCode);
+
+  return withSizedPayload(
+    {
+      _id: id,
+      account_id: account.account_id,
+      security_id: security.security_id,
+      trade_date: tradeDate,
+      trade_date_epoch: Date.parse(`${tradeDate}T00:00:00.000Z`),
+      acct_type_code: acctTypeCode,
+      transaction_type: transactionTypes[sequence % transactionTypes.length],
       quantity,
       amount
     },

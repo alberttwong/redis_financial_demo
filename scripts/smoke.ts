@@ -41,7 +41,7 @@ async function main() {
   }
 
   const account = await accountById({ client }, accountId);
-  console.log(`Account payload target check: ${jsonBytes(account.data)} bytes`);
+  console.log(`Account document size check: ${jsonBytes(account.data)} bytes`);
 }
 
 main()

@@ -28,7 +28,7 @@ memtier_benchmark \
   --threads "${MEMTIER_THREADS:-4}" \
   --clients "${MEMTIER_CLIENTS:-50}" \
   --pipeline "${MEMTIER_PIPELINE:-16}" \
-  --rate-limiting "${MEMTIER_TRANSACTION_RATE_PER_CONNECTION:-300}" \
+  --rate-limiting "${MEMTIER_TRADE_RATE_PER_CONNECTION:-${MEMTIER_TRANSACTION_RATE_PER_CONNECTION:-300}}" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
   --monitor-input monitor-input/trade-writes.txt \
   --monitor-pattern R \

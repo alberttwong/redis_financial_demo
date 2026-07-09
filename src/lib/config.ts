@@ -10,7 +10,6 @@ export type SeedConfig = {
   securityCount: number;
   positionsPerAccount: number;
   transactionCount: number;
-  accountBytes: number;
   securityBytes: number;
   positionBytes: number;
   transactionBytes: number;
@@ -48,12 +47,12 @@ export function getRedisConfig(): RedisConfig {
 }
 
 export function getSeedConfig(): SeedConfig {
+  const accountCount = readInt("SEED_ACCOUNTS", 100);
   return {
-    accountCount: readInt("SEED_ACCOUNTS", 100),
+    accountCount,
     securityCount: readInt("SEED_SECURITIES", 500),
-    positionsPerAccount: readInt("SEED_POSITIONS_PER_ACCOUNT", 8),
-    transactionCount: readInt("SEED_TRANSACTIONS", readInt("SEED_TRANSACTIONS_PER_ACCOUNT", 60) * readInt("SEED_ACCOUNTS", 100)),
-    accountBytes: readInt("SEED_ACCOUNT_BYTES", 102_400),
+    positionsPerAccount: readInt("SEED_POSITIONS_PER_ACCOUNT", 300),
+    transactionCount: readInt("SEED_TRANSACTIONS", readInt("SEED_TRANSACTIONS_PER_ACCOUNT", 60) * accountCount),
     securityBytes: readInt("SEED_SECURITY_BYTES", 8_192),
     positionBytes: readInt("SEED_POSITION_BYTES", 8_192),
     transactionBytes: readInt("SEED_TRANSACTION_BYTES", 8_192),

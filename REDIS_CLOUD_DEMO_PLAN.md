@@ -19,8 +19,8 @@ Defaults:
 - Cloud provider and region: AWS `us-west-2`
 - Subscription name: `lpl-redis-demo`
 - Database name: `lpl-query-patterns`
-- Dataset size: 10 GB
-- Throughput sizing: 70,000 operations per second
+- Dataset size: 300 GB
+- Throughput sizing: 180,000 operations per second
 - Endpoint access: public endpoint for local demo development. Use the Terraform `redis_tls` output to decide whether the app should use `redis://` or `rediss://`.
 - Eviction policy: `noeviction`, unless a later benchmark explicitly tests cache-style eviction
 
@@ -31,7 +31,7 @@ REDISCLOUD_ACCESS_KEY
 REDISCLOUD_SECRET_KEY
 ```
 
-The Terraform configuration should use Redis Cloud Pro/Flexible resources by default with `dataset_size_in_gb = 10`, `throughput_measurement_by = "operations-per-second"`, and `throughput_measurement_value = 70000`. Essentials should remain available as an explicit smaller-demo override, but Pro/Flexible is the default target for the performance demo.
+The Terraform configuration should use Redis Cloud Pro/Flexible resources by default with `dataset_size_in_gb = 300`, `throughput_measurement_by = "operations-per-second"`, and `throughput_measurement_value = 180000`. Essentials should remain available as an explicit smaller-demo override, but Pro/Flexible is the default target for the performance demo.
 
 Switching an existing Terraform-managed Essentials deployment to the default Pro/Flexible resource family creates Pro/Flexible resources and removes the Essentials resources from that state. Export or reseed demo data before applying that replacement.
 
@@ -71,9 +71,9 @@ Each SQL row becomes one flat Redis JSON document with SQL-friendly top-level fi
 - `household_id`
 - `status`
 
-Large non-indexed row content should live in a `payload` field so Redis Query Engine indexes remain narrow.
+Large non-indexed row content should live in a `payload` field so Redis Query Engine indexes remain narrow. Account rows are compact metadata documents and should not include synthetic payloads.
 
-Account information documents are expected to be about 100KB each. A single account-by-id lookup should return the full account JSON document, not a trimmed projection. The initial load profile generates 1,000 accounts, which is about 97.66 MiB of account JSON before Redis and index overhead.
+Account information documents are compact metadata rows. A single account-by-id lookup should return the full account JSON document, not a trimmed projection.
 
 Position and transaction documents should support configurable payload sizes up to 400KB for stress and transfer-size tests.
 
@@ -104,7 +104,7 @@ The generator should maintain referential consistency:
 
 Document size targets:
 
-- Account Info: about 100KB per row by default
+- Account Info: compact metadata row with no synthetic payload
 - Security Info: configurable up to 100KB, S&P 500-style equity rows
 - Position: configurable up to 400KB
 - Transaction: configurable up to 400KB
@@ -119,8 +119,7 @@ Example account row shape:
   "account_type": "BROKERAGE",
   "registration_type": "INDIVIDUAL",
   "status": "ACTIVE",
-  "opened_date": "2018-04-12",
-  "payload": "..."
+  "opened_date": "2018-04-12"
 }
 ```
 
@@ -135,7 +134,7 @@ acct:{account_id}:info
 sec:{security_id}:info
 pos:{account_id}:{security_no}:{acct_type_code}
 txn:{account_id}:{security_id}:{trade_date}:{acct_type_code}
-acct:{account_id}:snapshot
+acct-snapshot:{account_id}
 ```
 
 Access pattern mapping:
@@ -160,7 +159,7 @@ Use Redis Query Engine field types intentionally:
 
 - `TAG` for exact IDs and codes
 - `NUMERIC` for dates or ranges when needed
-- No index on 100KB or 400KB `payload` fields
+- No index on large `payload` fields
 
 Use `DIALECT 2` for all `FT.SEARCH` and `FT.AGGREGATE` examples.
 
@@ -170,7 +169,7 @@ The UI and API should expose the same query examples.
 
 Individual lookup examples:
 
-- Account by `account_id`, returning the full about-100KB JSON document
+- Account by `account_id`, returning the full compact account JSON document
 - Security by `security_id`
 - Security by `security_no`
 - Position by composite key
@@ -235,7 +234,7 @@ For hot joins, maintain materialized Redis JSON read models after base table loa
 Primary materialized example:
 
 ```text
-acct:{account_id}:snapshot
+acct-snapshot:{account_id}
 ```
 
 The snapshot can include:
@@ -263,11 +262,11 @@ Benchmark scripts should target Redis Cloud using:
 - Tunable pipeline depth
 - Tunable rate limiting
 
-The default target is about 60,000 transaction-data operations per second. In the dedicated transaction profile, this is calculated as `threads * clients * MEMTIER_TRANSACTION_RATE_PER_CONNECTION`, with defaults `4 * 50 * 300 = 60,000`.
+The default target is about 180,000 transaction-data operations per second. In the dedicated transaction profile, this is calculated as `threads * clients * MEMTIER_TRANSACTION_RATE_PER_CONNECTION`, with defaults `4 * 50 * 900 = 180,000`.
 
 Create separate profiles:
 
-- Full 100KB account `JSON.GET` reads
+- Compact account `JSON.GET` reads
 - Transaction-data reads using live `JSON.GET txn:... $` commands when Redis is available
 - Secondary-index `FT.SEARCH` lookups
 - Mixed account/security/position/transaction lookup traffic
@@ -304,7 +303,7 @@ Add a smoke test flow:
 
 1. Create or recreate indexes.
 2. Seed a small table-by-table dataset.
-3. Verify one account document is about 100KB.
+3. Verify one account document has no synthetic payload field.
 4. Run primary account lookup.
 5. Run security secondary lookup.
 6. Run position secondary lookup.
@@ -332,8 +331,8 @@ Unit and integration test coverage should include:
 - Redis Cloud is the only Redis runtime target.
 - Terraform provisions Redis Cloud infrastructure.
 - Terraform uses the Redis Cloud account's default payment method.
-- Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 10 GB dataset size, and 70,000 operations per second is the default target.
+- Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 300 GB dataset size, and 180,000 operations per second is the default target.
 - SQL remains the source of truth.
 - Redis receives batched table extracts, not streaming CDC, for this demo.
-- Account info documents are expected to be about 100KB and are returned in full for single-account reads.
+- Account info documents are compact metadata rows without synthetic payloads and are returned in full for single-account reads.
 - Redis is used as a high-performance serving, search, and read-model layer, not as a relational SQL join engine.
