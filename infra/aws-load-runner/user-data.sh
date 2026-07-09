@@ -5,18 +5,23 @@ dnf update -y
 dnf install -y \
   autoconf \
   automake \
+  curl \
   gcc \
   gcc-c++ \
   git \
   jq \
+  libevent-devel \
   libtool \
   make \
-  nodejs \
-  npm \
   openssl-devel \
   pcre-devel \
+  pkgconf-pkg-config \
   tar \
   zlib-devel
+
+curl -fsSL https://rpm.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+bash /tmp/nodesource_setup.sh
+dnf install -y nodejs --allowerasing
 
 if ! command -v memtier_benchmark >/dev/null 2>&1; then
   rm -rf /opt/memtier_benchmark

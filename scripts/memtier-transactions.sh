@@ -30,6 +30,7 @@ memtier_benchmark \
   --pipeline "${MEMTIER_PIPELINE:-16}" \
   --rate-limiting "${MEMTIER_TRANSACTION_RATE_PER_CONNECTION:-900}" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
+  --command "__monitor_line@__" \
   --monitor-input monitor-input/transactions.txt \
   --monitor-pattern R \
   --json-out-file memtier-output/transactions.json \
