@@ -39,7 +39,7 @@ Open <http://localhost:3000>.
 
 ## Query Examples
 
-- Account by `account_id`, returning the full ~100KB JSON row.
+- Account by `account_id`, returning the compact account metadata row.
 - Security by `security_id` or S&P 500-style `security_no`.
 - Position by composite id or `account_id`.
 - Transaction by composite id, `account_id`, `security_id`, or combined filters.
@@ -68,7 +68,6 @@ erDiagram
         string registration_type
         string status
         string opened_date
-        json payload "about 100KB"
     }
 
     SECURITIES {
@@ -195,7 +194,7 @@ flowchart LR
 
 ## Load Testing
 
-The primary load test target is **60,000 transaction-data operations per second**. Install `memtier_benchmark` first if it is not already on `PATH`.
+The primary load test target is **180,000 transaction-data operations per second**. Install `memtier_benchmark` first if it is not already on `PATH`.
 
 ```sh
 brew install memtier_benchmark
@@ -218,16 +217,16 @@ The default target comes from:
 ```text
 MEMTIER_THREADS=4
 MEMTIER_CLIENTS=50
-MEMTIER_TRANSACTION_RATE_PER_CONNECTION=300
+MEMTIER_TRANSACTION_RATE_PER_CONNECTION=900
 
-4 * 50 * 300 = 60,000 transaction-data ops/sec
+4 * 50 * 900 = 180,000 transaction-data ops/sec
 ```
 
 `MEMTIER_PIPELINE=16` helps keep requests in flight, but it is not part of the target-rate multiplication.
 
 ## Initial Load Profile
 
-The initial load profile generates **1,000 accounts**. The seeder writes base JSON rows first, creates or verifies Redis Query Engine indexes after the base load, then builds account snapshots with bounded concurrency.
+The initial load profile generates **5,000 accounts**. The seeder writes base JSON rows first, creates or verifies Redis Query Engine indexes after the base load, then builds account snapshots with bounded concurrency.
 
 ### Full Initial Load
 
@@ -265,23 +264,23 @@ SEED_SKIP_SNAPSHOTS=false
 
 Higher `SEED_BATCH_SIZE` can improve throughput but also raises local memory and in-flight command pressure. Higher `SEED_SNAPSHOT_CONCURRENCY` reduces snapshot wall-clock time until Redis Cloud or network latency becomes the bottleneck.
 
-The fastest full load is from a machine close to Redis Cloud, for example a temporary runner or VM in AWS `us-west-2`; the 100KB account rows make laptop-to-cloud latency visible. Deferring index creation helps most on a fresh database. If indexes already exist, Redis still maintains them during base writes.
+The fastest full load is from a machine close to Redis Cloud, for example a temporary runner or VM in AWS `us-west-2`; larger security, position, transaction, and snapshot rows can make laptop-to-cloud latency visible. Deferring index creation helps most on a fresh database. If indexes already exist, Redis still maintains them during base writes.
 
 This profile expands to:
 
 ```text
-1,000 accounts
-1,000 securities
-8,000 positions
-10,000 random transactions across the accounts
-1,000 account snapshots
+5,000 accounts
+3,000 securities
+1,500,000 positions
+10,000,000 random transactions across the accounts
+5,000 account snapshots
 ```
 
-At 100KB per account, the account table alone is about 97.66 MiB before Redis JSON, index, position, transaction, and snapshot overhead.
+Account rows are compact metadata documents without synthetic payloads. Larger payload sizing remains available for securities, positions, transactions, and generated trade writes.
 
 ## Trade Write Load Testing
 
-The trade-write workload randomly selects accounts and securities from the configured seed population, generates transaction JSON rows, and drives them through Redis as `JSON.SET txn:... $ ...` commands. With the initial-load profile, trades are distributed across 1,000 accounts and 1,000 securities.
+The trade-write workload randomly selects accounts and securities from the configured seed population, generates transaction JSON rows, and drives them through Redis as `JSON.SET txn:... $ ...` commands. With the initial-load profile, trades are distributed across 5,000 accounts and 3,000 securities.
 
 ```sh
 npm run bench:prepare
@@ -293,7 +292,7 @@ The target is still:
 ```text
 MEMTIER_THREADS=4
 MEMTIER_CLIENTS=50
-MEMTIER_TRANSACTION_RATE_PER_CONNECTION=300
+MEMTIER_TRADE_RATE_PER_CONNECTION=300
 
 4 * 50 * 300 = 60,000 trade writes/sec
 ```
@@ -306,7 +305,7 @@ Terraform for Redis Cloud lives in `infra/redis-cloud`. Run it through `./terraf
 
 Use the Terraform `redis_url`, `redis_tls`, `redis_host`, `redis_port`, and `redis_password` outputs to build the ignored local `.env.local`. `redis_url` and `redis_password` are sensitive outputs; write them to the file rather than printing them in shared logs.
 
-The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 10 GB dataset size, and throughput sizing set to 70,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
+The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 300 GB dataset size, and throughput sizing set to 180,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
 
 Moving an existing Terraform-managed Essentials database to the default Pro/Flexible resource family is a replacement, not an in-place resize in this repo. Plan to export or reseed data when applying that change.
 
@@ -315,19 +314,19 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - SQL is the source of truth; Redis Cloud is the serving, search, and read-model layer.
 - Data is batch-loaded into Redis table by table, not streamed with CDC in this demo.
 - Redis stores one flat JSON document per logical SQL row, using SQL-friendly field names.
-- Account Info documents are expected to be about 100KB and single-account reads return the full JSON document.
+- Account Info documents are compact metadata rows without synthetic payloads, and single-account reads return the full JSON document.
 - Security Info documents are configurable up to 100KB and mimic S&P 500-style equity constituents with sector, industry, exchange, and index membership metadata.
 - Position and Transaction documents are configurable up to 400KB, but the default demo payloads are smaller to fit the current Redis Cloud demo database.
-- Initial load generates 1,000 accounts and 1,000 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
-- With the default initial-load profile, 1,000 accounts produces 8,000 positions, 10,000 random transactions across the account population, and 1,000 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
+- Initial load generates 5,000 accounts and 3,000 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
+- With the default initial-load profile, 5,000 accounts produces 1,500,000 positions, 10,000,000 random transactions across the account population, and 5,000 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
 - In a typical stock trading scenario, `transactions` are the incoming change/history records and `positions` are derived current or as-of holdings.
 - Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` commands to hydrate related JSON rows across Redis Cluster slots.
 - Redis is not used as a relational SQL join planner.
 - Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
-- The primary load test target is 60,000 transaction-data operations per second.
+- The primary load test target is 180,000 transaction-data operations per second.
 - The trade-write load test randomly selects accounts and securities, generates transaction JSON rows, and writes them with `JSON.SET txn:... $ ...`.
 - `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.
-- The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 10 GB dataset size, and 70,000 operations per second using the Redis Cloud account's default payment method.
+- The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 300 GB dataset size, and 180,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.
 - Use the Terraform `redis_tls` output rather than assuming TLS mode; Pro/Flexible and Essentials deployments can differ.
 - Local `.env.local`, Terraform state, generated plan files, `.next`, `node_modules`, and benchmark outputs are intentionally ignored by git.

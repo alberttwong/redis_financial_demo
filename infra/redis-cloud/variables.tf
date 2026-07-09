@@ -23,7 +23,7 @@ variable "region" {
 }
 
 variable "subscription_type" {
-  description = "Redis Cloud subscription family. Pro is the default target for the 10 GB / 70k ops/sec demo; Essentials remains available for smaller local demos."
+  description = "Redis Cloud subscription family. Pro is the default target for the 300 GB / 180k ops/sec demo; Essentials remains available for smaller local demos."
   type        = string
   default     = "pro"
 
@@ -60,7 +60,7 @@ variable "multiple_availability_zones" {
 variable "dataset_size_in_gb" {
   description = "Redis Cloud Pro/Flexible database dataset size in GB."
   type        = number
-  default     = 10
+  default     = 300
 }
 
 variable "throughput_measurement_by" {
@@ -77,7 +77,7 @@ variable "throughput_measurement_by" {
 variable "throughput_measurement_value" {
   description = "Redis Cloud Pro/Flexible throughput target. With operations-per-second, this is the requested ops/sec capacity."
   type        = number
-  default     = 70000
+  default     = 180000
 }
 
 variable "redis_version" {

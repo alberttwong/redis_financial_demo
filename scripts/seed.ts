@@ -7,7 +7,7 @@ import {
   makeAccount,
   makePosition,
   makeSecurity,
-  makeTransaction,
+  makeTransactionForSequence,
   seedFaker
 } from "../src/lib/data";
 import { accountKey, securityKey, snapshotKey } from "../src/lib/keys";
@@ -19,6 +19,7 @@ type SeedTarget = "accounts" | "securities" | "positions" | "transactions" | "sn
 type AccountRef = Pick<AccountRow, "account_id">;
 type SecurityRef = Pick<SecurityRow, "security_id" | "security_no">;
 type SeedTask = [SeedTarget, () => Promise<number>];
+type RedisRow = { key: string; value: unknown };
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return Math.round(ms) + "ms";
@@ -38,15 +39,14 @@ async function timeTask<T>(name: string, task: () => Promise<T>): Promise<T> {
   }
 }
 
-async function writeBatch(label: string, rows: Array<{ key: string; value: unknown }>, batchSize = getSeedConfig().batchSize): Promise<number> {
-  const client = await getRedisClient();
+async function writeBatch(label: string, rows: RedisRow[], batchSize = getSeedConfig().batchSize): Promise<number> {
   let written = 0;
   let lastProgressAt = performance.now();
 
   console.log(label + ": writing " + rows.length + " rows in batches of " + batchSize);
   for (let offset = 0; offset < rows.length; offset += batchSize) {
     const batch = rows.slice(offset, offset + batchSize);
-    await Promise.all(batch.map((row) => jsonSet(client, row.key, row.value)));
+    await writeRows(batch);
     written += batch.length;
 
     const now = performance.now();
@@ -57,6 +57,20 @@ async function writeBatch(label: string, rows: Array<{ key: string; value: unkno
   }
 
   return written;
+}
+
+async function writeRows(rows: RedisRow[]): Promise<void> {
+  const client = await getRedisClient();
+  await Promise.all(rows.map((row) => jsonSet(client, row.key, row.value)));
+}
+
+function logWriteProgress(label: string, written: number, total: number, lastProgressAt: number): number {
+  const now = performance.now();
+  if (written === total || now - lastProgressAt >= 5000) {
+    console.log(label + ": wrote " + written + "/" + total);
+    return now;
+  }
+  return lastProgressAt;
 }
 
 function accountId(index: number): string {
@@ -86,7 +100,7 @@ function makeSecurityRefs(): SecurityRef[] {
 
 function makeAccounts(): AccountRow[] {
   const config = getSeedConfig();
-  return Array.from({ length: config.accountCount }, (_, index) => makeAccount(index, config.accountBytes));
+  return Array.from({ length: config.accountCount }, (_, index) => makeAccount(index));
 }
 
 function makeSecurities(): SecurityRow[] {
@@ -108,43 +122,72 @@ async function seedPositions(): Promise<number> {
   const config = getSeedConfig();
   const accounts = makeAccountRefs();
   const securities = makeSecurityRefs();
-  const rows = accounts.flatMap((account, accountIndex) =>
-    Array.from({ length: config.positionsPerAccount }, (_, offset) => {
+  const total = accounts.length * config.positionsPerAccount;
+  const batch: RedisRow[] = [];
+  let written = 0;
+  let lastProgressAt = performance.now();
+
+  console.log("positions: writing " + total + " rows in batches of " + config.batchSize);
+  for (const [accountIndex, account] of accounts.entries()) {
+    for (let offset = 0; offset < config.positionsPerAccount; offset += 1) {
       const security = securities[(accountIndex * config.positionsPerAccount + offset) % securities.length];
       const position = makePosition(account, security, config.positionBytes);
-      return {
+      batch.push({
         key: "pos:" + position.account_id + ":" + position.security_no + ":" + position.acct_type_code,
         value: position
-      };
-    })
-  );
-  return writeBatch("positions", rows);
+      });
+
+      if (batch.length >= config.batchSize) {
+        await writeRows(batch);
+        written += batch.length;
+        batch.length = 0;
+        lastProgressAt = logWriteProgress("positions", written, total, lastProgressAt);
+      }
+    }
+  }
+
+  if (batch.length > 0) {
+    await writeRows(batch);
+    written += batch.length;
+    lastProgressAt = logWriteProgress("positions", written, total, lastProgressAt);
+  }
+
+  return written;
 }
 
 async function seedTransactions(): Promise<number> {
   const config = getSeedConfig();
   const accounts = makeAccountRefs();
   const securities = makeSecurityRefs();
-  const rows: Array<{ key: string; value: unknown }> = [];
-  const usedKeys = new Set<string>();
-  let attempts = 0;
+  const batch: RedisRow[] = [];
+  let written = 0;
+  let lastProgressAt = performance.now();
 
-  while (rows.length < config.transactionCount && attempts < config.transactionCount * 5) {
-    attempts += 1;
-    const account = faker.helpers.arrayElement(accounts);
-    const security = faker.helpers.arrayElement(securities);
-    const transaction = makeTransaction(account, security, config.transactionBytes);
+  console.log("transactions: writing " + config.transactionCount + " rows in batches of " + config.batchSize);
+  for (let index = 0; index < config.transactionCount; index += 1) {
+    const accountIndex = index % accounts.length;
+    const sequence = Math.floor(index / accounts.length);
+    const account = accounts[accountIndex];
+    const security = securities[(accountIndex * 131 + sequence) % securities.length];
+    const transaction = makeTransactionForSequence(account, security, sequence, securities.length, config.transactionBytes);
     const key = "txn:" + transaction.account_id + ":" + transaction.security_id + ":" + transaction.trade_date + ":" + transaction.acct_type_code;
-    if (usedKeys.has(key)) continue;
-    usedKeys.add(key);
-    rows.push({ key, value: transaction });
+    batch.push({ key, value: transaction });
+
+    if (batch.length >= config.batchSize) {
+      await writeRows(batch);
+      written += batch.length;
+      batch.length = 0;
+      lastProgressAt = logWriteProgress("transactions", written, config.transactionCount, lastProgressAt);
+    }
   }
 
-  if (rows.length < config.transactionCount) {
-    throw new Error("Only generated " + rows.length + " unique transactions after " + attempts + " attempts.");
+  if (batch.length > 0) {
+    await writeRows(batch);
+    written += batch.length;
+    lastProgressAt = logWriteProgress("transactions", written, config.transactionCount, lastProgressAt);
   }
 
-  return writeBatch("transactions", rows);
+  return written;
 }
 
 async function loadSecurityLookup(): Promise<Map<string, Omit<SecurityRow, "payload">>> {
@@ -173,7 +216,7 @@ async function buildSnapshot(account: AccountRef, securityByNo: Map<string, Omit
 
   const [positions, transactions] = await Promise.all([
     positionsByAccount({ client }, account.account_id),
-    transactionsSearch({ client }, { accountId: account.account_id, limit: Math.min(config.transactionCount, 100) })
+    transactionsSearch({ client }, { accountId: account.account_id, limit: Math.min(config.transactionCount, 200) })
   ]);
 
   const snapshotPositions: AccountSnapshot["positions"] = positions.data.map((position: PositionRow) => ({
@@ -185,11 +228,11 @@ async function buildSnapshot(account: AccountRef, securityByNo: Map<string, Omit
     _id: account.account_id,
     account_id: account.account_id,
     generated_at: new Date().toISOString(),
-    account: stripPayload(existingAccount),
+    account: existingAccount,
     position_count: positions.result_count,
     transaction_count: transactions.result_count,
     total_market_value: positions.data.reduce((sum: number, position: PositionRow) => sum + position.market_value, 0),
-    recent_transactions: transactions.data.slice(0, 25).map((transaction: TransactionRow) => stripPayload(transaction)),
+    recent_transactions: transactions.data.slice(0, 200).map((transaction: TransactionRow) => stripPayload(transaction)),
     positions: snapshotPositions
   };
 

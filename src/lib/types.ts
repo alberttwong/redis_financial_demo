@@ -7,7 +7,6 @@ export type AccountRow = {
   registration_type: string;
   status: string;
   opened_date: string;
-  payload: string;
 };
 
 export type SecurityRow = {
@@ -55,7 +54,7 @@ export type AccountSnapshot = {
   _id: string;
   account_id: string;
   generated_at: string;
-  account: Omit<AccountRow, "payload">;
+  account: AccountRow;
   position_count: number;
   transaction_count: number;
   total_market_value: number;
