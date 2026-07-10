@@ -39,12 +39,30 @@ Open <http://localhost:3000>.
 
 ## Query Examples
 
-- Account by `account_id`, returning the compact account metadata row.
-- Security by `security_id` or S&P 500-style `security_no`.
-- Position by composite id or `account_id`.
-- Transaction by composite id, `account_id`, `security_id`, or combined filters.
-- Runtime joins for account portfolios, account activity, security exposure, and transaction detail.
-- Materialized account snapshot lookup for hot join/read-model comparisons.
+The browser workbench at `/` calls `/api/query` with a `pattern` parameter. It supports these query patterns:
+
+| Group | Pattern | Workbench label | Main inputs | Redis access pattern |
+| --- | --- | --- | --- | --- |
+| Primary | `accountById` | Account by ID | `account_id` | `JSON.GET acct:{account_id}:info $` |
+| Primary | `securityById` | Security by ID | `security_id` | `JSON.GET sec:{security_id}:info $` |
+| Secondary | `securityByNo` | Security by No | `security_no` | `FT.SEARCH idx:securities @security_no:{...}` then pipelined `JSON.GET` |
+| Primary | `positionByComposite` | Position composite | `account_id`, `security_no`, `acct_type_code` | `JSON.GET pos:{account_id}:{security_no}:{acct_type_code} $` |
+| Secondary | `positionsByAccount` | Positions by account | `account_id` | `FT.SEARCH idx:positions @account_id:{...} LIMIT 0 500` then pipelined `JSON.GET` |
+| Primary | `transactionByComposite` | Transaction composite | `account_id`, `security_id`, `trade_date`, `acct_type_code` | `JSON.GET txn:{account_id}:{security_id}:{trade_date}:{acct_type_code} $` |
+| Secondary | `transactionsByAccount` | Transactions by account | `account_id`, `limit` | `FT.SEARCH idx:transactions @account_id:{...}` then pipelined `JSON.GET` |
+| Secondary | `transactionsBySecurity` | Transactions by security | `security_id`, `limit` | `FT.SEARCH idx:transactions @security_id:{...}` then pipelined `JSON.GET` |
+| Secondary | `transactionsByAccountSecurity` | Transactions by account + security | `account_id`, `security_id`, `limit` | `FT.SEARCH idx:transactions @account_id:{...} @security_id:{...}` then pipelined `JSON.GET` |
+| Join | `accountPortfolioJoin` | Account portfolio join | `account_id` | `JSON.GET` account, search positions by account, search securities by `security_no`, then assemble in the API |
+| Join | `accountActivityJoin` | Account activity join | `account_id` | `JSON.GET` account, search recent transactions by account, fetch securities by key, then assemble in the API |
+| Read model | `accountSnapshot` | Materialized account snapshot | `account_id` | `JSON.GET acct-snapshot:{account_id} $` |
+
+The API accepts:
+
+```text
+/api/query?pattern=<pattern>&account_id=...&security_id=...&security_no=...&acct_type_code=...&trade_date=...&limit=100
+```
+
+Responses include `data`, `timing`, `result_count`, `payload_bytes`, and the Redis `commands` used for the query.
 
 On startup, the web workbench calls `/api/samples` to discover working seeded values for account, security, position, and transaction examples. This keeps secondary-index and composite-key examples from defaulting to IDs that do not exist in the current Redis Cloud dataset.
 
