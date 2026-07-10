@@ -9,7 +9,7 @@ Defaults:
 - Subscription: `lpl-redis-demo`
 - Database: `lpl-query-patterns`
 - Redis version: `8.4`
-- Dataset size: 300 GB
+- Dataset size: 20 GB
 - Throughput sizing: 180,000 operations per second
 - Default Redis Cloud account payment method
 - TLS enabled
