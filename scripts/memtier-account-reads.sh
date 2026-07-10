@@ -30,6 +30,7 @@ memtier_benchmark \
   --pipeline "${MEMTIER_PIPELINE:-16}" \
   --rate-limiting "${MEMTIER_RATE_PER_CONNECTION:-75}" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
+  --command "__monitor_line@__" \
   --monitor-input monitor-input/account-reads.txt \
   --monitor-pattern R \
   --json-out-file memtier-output/account-reads.json \

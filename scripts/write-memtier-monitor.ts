@@ -6,6 +6,8 @@ import { closeRedisClient, getRedisClient } from "../src/lib/redis";
 import { searchKeys } from "../src/lib/search";
 import type { TransactionRow } from "../src/lib/types";
 
+const TRANSACTION_INDEX = "idx:transactions";
+
 async function main() {
   const config = getSeedConfig();
   await mkdir("monitor-input", { recursive: true });
@@ -56,14 +58,22 @@ async function makeTransactionLines(accountCount: number): Promise<string[]> {
     return fallbackTransactionSearchLines(accountCount);
   }
 
+  const maxKeys = readInt("MEMTIER_TRANSACTION_KEYS", 10_000);
+  const waitTimeoutMs = readInt(
+    "MEMTIER_TRANSACTION_INDEX_WAIT_MS",
+    10 * 60 * 1000
+  );
+  const waitIntervalMs = readInt("MEMTIER_TRANSACTION_INDEX_POLL_MS", 5_000);
+
   try {
     const client = await getRedisClient();
+    await waitForTransactionIndex(client, waitTimeoutMs, waitIntervalMs);
+
     const keys: string[] = [];
     const pageSize = 1000;
-    const maxKeys = Number.parseInt(process.env.MEMTIER_TRANSACTION_KEYS ?? "10000", 10);
 
     for (let offset = 0; keys.length < maxKeys; offset += pageSize) {
-      const page = await searchKeys(client, "idx:transactions", "*", {
+      const page = await searchKeys(client, TRANSACTION_INDEX, "*", {
         offset,
         limit: Math.min(pageSize, maxKeys - keys.length)
       });
@@ -76,16 +86,16 @@ async function makeTransactionLines(accountCount: number): Promise<string[]> {
     if (keys.length > 0) {
       return keys.map((key) => `"JSON.GET" "${key}" "$"`);
     }
+
+    throw new Error(`No transaction keys found in ${TRANSACTION_INDEX} after index readiness check.`);
   } catch (error) {
     await closeRedisClient().catch(() => undefined);
-    console.warn(
-      `Could not load live transaction keys from Redis; falling back to indexed transaction searches. ${
+    throw new Error(
+      `Could not load live transaction keys from Redis for JSON.GET benchmark input. ${
         error instanceof Error ? error.message : String(error)
       }`
     );
   }
-
-  return fallbackTransactionSearchLines(accountCount);
 }
 
 function fallbackTransactionSearchLines(accountCount: number): string[] {
@@ -93,6 +103,85 @@ function fallbackTransactionSearchLines(accountCount: number): string[] {
     const accountId = `A${String((index % accountCount) + 1).padStart(8, "0")}`;
     return `"FT.SEARCH" "idx:transactions" "@account_id:{${accountId}}" "NOCONTENT" "LIMIT" "0" "20" "DIALECT" "2"`;
   });
+}
+
+type IndexStatus = {
+  indexing: number | null;
+  numDocs: number;
+  percentIndexed: number | null;
+};
+
+async function waitForTransactionIndex(
+  client: Awaited<ReturnType<typeof getRedisClient>>,
+  timeoutMs: number,
+  intervalMs: number
+): Promise<void> {
+  const startedAt = Date.now();
+  let lastStatus: IndexStatus | null = null;
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    lastStatus = await transactionIndexStatus(client);
+
+    const indexIsReady =
+      lastStatus.numDocs > 0 &&
+      lastStatus.indexing === 0 &&
+      (lastStatus.percentIndexed === null || lastStatus.percentIndexed >= 1);
+
+    if (indexIsReady) {
+      console.log(
+        `${TRANSACTION_INDEX}: ready with ${lastStatus.numDocs} docs${
+          lastStatus.percentIndexed === null ? "" : `, percent_indexed=${lastStatus.percentIndexed}`
+        }`
+      );
+      return;
+    }
+
+    console.log(
+      `${TRANSACTION_INDEX}: waiting for backfill, docs=${lastStatus.numDocs}, indexing=${
+        lastStatus.indexing ?? "unknown"
+      }, percent_indexed=${
+        lastStatus.percentIndexed ?? "unknown"
+      }`
+    );
+    await sleep(intervalMs);
+  }
+
+  throw new Error(
+    `${TRANSACTION_INDEX} was not ready after ${timeoutMs}ms. Last status: docs=${lastStatus?.numDocs ?? "unknown"}, indexing=${
+      lastStatus?.indexing ?? "unknown"
+    }, percent_indexed=${lastStatus?.percentIndexed ?? "unknown"}`
+  );
+}
+
+async function transactionIndexStatus(
+  client: Awaited<ReturnType<typeof getRedisClient>>
+): Promise<IndexStatus> {
+  const raw = await client.sendCommand(["FT.INFO", TRANSACTION_INDEX]);
+  if (!Array.isArray(raw)) {
+    throw new Error(`${TRANSACTION_INDEX}: FT.INFO returned an unexpected response.`);
+  }
+
+  const info = new Map<string, unknown>();
+  for (let index = 0; index < raw.length; index += 2) {
+    info.set(String(raw[index]), raw[index + 1]);
+  }
+
+  return {
+    indexing: readNumber(info.get("indexing")),
+    numDocs: readNumber(info.get("num_docs")) ?? 0,
+    percentIndexed: readNumber(info.get("percent_indexed"))
+  };
+}
+
+function readNumber(value: unknown): number | null {
+  if (typeof value === "number") return value;
+  if (typeof value !== "string") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function makeTradeWriteLines(options: {

@@ -22,7 +22,10 @@
     "bench:transactions": "bash scripts/memtier-transactions.sh",
     "bench:trade-writes": "bash scripts/memtier-trade-writes.sh",
     "bench:account-reads": "bash scripts/memtier-account-reads.sh",
-    "bench:mixed": "bash scripts/memtier-mixed.sh"
+    "bench:mixed": "bash scripts/memtier-mixed.sh",
+    "bench:concurrent": "bash scripts/bench-concurrent.sh",
+    "bench:aws-web": "bash scripts/aws-load-runner-start-web.sh",
+    "bench:aws-runner": "bash scripts/aws-load-runner-run.sh"
   },
   "dependencies": {
     "@faker-js/faker": "^9.9.0",

@@ -1,7 +1,11 @@
 import type { RedisClientType } from "redis";
 
 export async function jsonSet(client: RedisClientType, key: string, value: unknown): Promise<void> {
-  await client.sendCommand(["JSON.SET", key, "$", JSON.stringify(value)]);
+  await client.sendCommand(jsonSetCommand(key, value));
+}
+
+export function jsonSetCommand(key: string, value: unknown): string[] {
+  return ["JSON.SET", key, "$", JSON.stringify(value)];
 }
 
 export async function jsonGet<T>(client: RedisClientType, key: string): Promise<T | null> {
