@@ -210,7 +210,15 @@ MEMTIER_TEST_TIME=60 npm run bench:transactions
 
 The benchmark wrappers load `.env.local` and derive `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, and `REDIS_TLS` from `REDIS_URL`, so the connection string remains the source of truth for memtier runs. For TLS Redis Cloud endpoints, the wrappers pass `--tls-skip-verify` by default because macOS memtier builds may not use the system Keychain CA store. Set `MEMTIER_TLS_CACERT=/path/to/ca-bundle.pem` to verify with an explicit CA bundle instead.
 
-`bench:prepare` writes `monitor-input/transactions.txt`. When `REDIS_URL` is available, it pulls real transaction keys from Redis and writes `JSON.GET txn:... $` commands. Without Redis access, it falls back to transaction-index searches with `FT.SEARCH idx:transactions`.
+`bench:prepare` writes `monitor-input/transactions.txt`. When `REDIS_URL` is available, it waits for `idx:transactions` to finish backfilling, pulls real transaction keys from Redis, and writes `JSON.GET txn:... $` commands. If Redis is configured but transaction keys cannot be loaded, the script fails instead of silently changing the benchmark into an `FT.SEARCH` workload. Without Redis access, it falls back to transaction-index searches with `FT.SEARCH idx:transactions` so monitor files can still be generated offline.
+
+Useful transaction-read preparation knobs:
+
+```text
+MEMTIER_TRANSACTION_KEYS=10000
+MEMTIER_TRANSACTION_INDEX_WAIT_MS=600000
+MEMTIER_TRANSACTION_INDEX_POLL_MS=5000
+```
 
 The default target comes from:
 
