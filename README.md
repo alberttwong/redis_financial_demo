@@ -223,14 +223,14 @@ MEMTIER_TRANSACTION_INDEX_POLL_MS=5000
 The default target comes from:
 
 ```text
-MEMTIER_THREADS=4
-MEMTIER_CLIENTS=50
-MEMTIER_TRANSACTION_RATE_PER_CONNECTION=750
+MEMTIER_THREADS=8
+MEMTIER_CLIENTS=100
+MEMTIER_TRANSACTION_RATE_PER_CONNECTION=188
 
-4 * 50 * 750 = 150,000 transaction reads/sec
+8 * 100 * 188 = 150,400 transaction reads/sec
 ```
 
-`MEMTIER_PIPELINE=16` helps keep requests in flight, but it is not part of the target-rate multiplication.
+`MEMTIER_PIPELINE=64` helps keep requests in flight, but it is not part of the target-rate multiplication.
 
 ### AWS us-west-2 Runner
 
@@ -321,11 +321,11 @@ npm run bench:trade-writes
 The target is:
 
 ```text
-MEMTIER_THREADS=4
-MEMTIER_CLIENTS=50
-MEMTIER_TRADE_RATE_PER_CONNECTION=150
+MEMTIER_THREADS=8
+MEMTIER_CLIENTS=100
+MEMTIER_TRADE_RATE_PER_CONNECTION=38
 
-4 * 50 * 150 = 30,000 trade writes/sec
+8 * 100 * 38 = 30,400 trade writes/sec
 ```
 
 Trade writes use memtier-generated keys with a run-specific `txn:load:<run-id>:` prefix and parallel sequential key allocation, so each write operation creates a unique transaction key during the run instead of replaying a fixed monitor-input slice. `MEMTIER_TRADE_RUN_ID`, `MEMTIER_TRADE_KEY_MAXIMUM`, and `MEMTIER_TRADE_PAYLOAD_BYTES` tune the generated key space and JSON payload size.

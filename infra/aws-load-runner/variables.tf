@@ -13,7 +13,7 @@ variable "name_prefix" {
 variable "instance_type" {
   description = "EC2 instance type for the benchmark runner."
   type        = string
-  default     = "c7i.2xlarge"
+  default     = "c7i.4xlarge"
 }
 
 variable "key_name" {

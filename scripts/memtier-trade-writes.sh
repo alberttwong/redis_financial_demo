@@ -53,10 +53,10 @@ memtier_benchmark \
   --port "$REDIS_PORT" \
   --authenticate "$REDIS_PASSWORD" \
   "${tls_args[@]}" \
-  --threads "${MEMTIER_THREADS:-4}" \
-  --clients "${MEMTIER_CLIENTS:-50}" \
-  --pipeline "${MEMTIER_PIPELINE:-16}" \
-  --rate-limiting "${MEMTIER_TRADE_RATE_PER_CONNECTION:-150}" \
+  --threads "${MEMTIER_THREADS:-8}" \
+  --clients "${MEMTIER_CLIENTS:-100}" \
+  --pipeline "${MEMTIER_PIPELINE:-64}" \
+  --rate-limiting "${MEMTIER_TRADE_RATE_PER_CONNECTION:-38}" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
   --key-prefix "txn:load:${trade_run_id}:" \
   --key-minimum 1 \
