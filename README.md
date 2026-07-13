@@ -1,6 +1,6 @@
 # Redis Financial Demo
 
-Demo app for SQL-batched financial data in Redis Cloud 8.4. The app stores flat SQL-friendly JSON rows in Redis Cloud, creates narrow Redis Query Engine indexes, exposes timed UI/API query examples, and includes Faker seeders plus `memtier_benchmark` workload helpers, including atomic trade writes.
+Demo app for SQL-batched financial data in Redis Cloud 8.4. The app stores flat SQL-friendly JSON rows in Redis Cloud, creates narrow Redis Query Engine indexes, exposes timed UI/API query examples, and includes Faker seeders plus query and atomic trade-write load tests.
 
 GitHub repository: <https://github.com/alberttwong/redis_financial_demo>
 
@@ -92,7 +92,11 @@ curl -X POST http://localhost:3000/api/transactions \
   }'
 ```
 
-Quantity rules are `BUY = +quantity`, `SELL = -quantity`, and no quantity change for `DIVIDEND`, `INTEREST`, `TRANSFER`, or `FEE`. Reusing the same `transaction_id` for the same position identity returns `duplicate` without applying the quantity twice. Market value is deliberately not derived from trade amount; a pricing/revaluation process must refresh it. Existing account snapshots also remain unchanged until the snapshot builder runs again.
+Quantity rules are `BUY = +quantity`, `SELL = -quantity`, and no quantity change for `DIVIDEND`, `INTEREST`, `TRANSFER`, or `FEE`. Reusing the same `transaction_id` for the same position identity returns `duplicate` without applying the quantity twice. Market value is deliberately not derived from trade amount; a pricing/revaluation process must refresh it.
+
+After the transaction/position Function completes, the runtime API calls `update_account_snapshot` against `acct-snapshot:{account_id}`. That Function atomically patches the embedded position, prepends the transaction to the retained recent-transaction window, updates counts and totals, and advances `generated_at`. Position projection versions prevent concurrent requests from overwriting a newer embedded position with an older result. If the snapshot is missing, the API builds it from the live account data and reapplies the idempotent incremental update.
+
+The source transaction/position commit and the account-snapshot projection are two separate atomic operations because their keys intentionally occupy different Redis Cluster hash slots. A snapshot failure therefore cannot roll back an already-committed transaction, but replaying the request repairs the retained snapshot projection without applying the position quantity twice. The direct memtier `FCALL apply_transaction` benchmark measures only the source transaction/position projection; automatic snapshot maintenance is part of `POST /api/transactions`.
 
 On startup, the web workbench calls `/api/samples` to discover working seeded values for account, security, position, and transaction examples. This keeps secondary-index and composite-key examples from defaulting to IDs that do not exist in the current Redis Cloud dataset.
 
@@ -143,6 +147,7 @@ erDiagram
         number quantity
         number market_value
         string as_of_date
+        number projection_version
         json payload
     }
 
@@ -234,7 +239,7 @@ flowchart LR
     FCALL["FCALL apply_transaction"]
     TXN["JSON.SET transaction if new"]
     POS["JSON.NUMINCRBY position quantity"]
-    SNAP["Refresh account snapshot"]
+    SNAP["FCALL update_account_snapshot"]
     READ["Account / portfolio read"]
 
     ORDER --> FCALL
@@ -247,49 +252,59 @@ flowchart LR
 
 ## Load Testing
 
-The primary load test target is **180,000 transaction-data operations per second**, split into **150,000 `positionsByAccount` reads/sec** and **30,000 atomic trade writes/sec** when `bench:concurrent` runs. Install `memtier_benchmark` first if it is not already on `PATH`.
+The concurrent load profile targets **230,000 operations per second** across 12 query reads and atomic transaction writes:
+
+- `accountPortfolioJoin` and `accountActivityJoin`: **50,000 reads/sec each**
+- The other 10 query patterns: **10,000 reads/sec each**
+- Trade writes: **30,000 writes/sec**
+
+The query tests call `/api/query`, so searches, hydration, API-layer joins, and response serialization follow the same path as the web UI. Start the app before running a standalone query test:
 
 ```sh
-brew install memtier_benchmark
-npm run bench:prepare
-npm run bench:positions-by-account
+npm run bench:aws-web
+npm run bench:query:account-by-id
 ```
 
-The positions-by-account benchmark runs for 60 seconds by default. To make the duration explicit:
+Run the complete workload with:
 
 ```sh
-MEMTIER_TEST_TIME=60 npm run bench:positions-by-account
+npm run bench:concurrent
 ```
 
-The benchmark wrappers load `.env.local` and derive `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, and `REDIS_TLS` from `REDIS_URL`, so the connection string remains the source of truth for memtier runs. For TLS Redis Cloud endpoints, the wrappers pass `--tls-skip-verify` by default because macOS memtier builds may not use the system Keychain CA store. Set `MEMTIER_TLS_CACERT=/path/to/ca-bundle.pem` to verify with an explicit CA bundle instead.
+`bench:concurrent` launches these 12 query tests together and also runs `bench:trade-writes`:
 
-`bench:prepare` writes `monitor-input/positions-by-account.txt` for the primary read benchmark. It replays the workbench `positionsByAccount` search shape as `FT.SEARCH idx:positions @account_id:{...} NOCONTENT LIMIT 0 500 DIALECT 2`.
+- `accountById`
+- `securityById`
+- `securityByNo`
+- `positionByComposite`
+- `positionsByAccount`
+- `transactionById`
+- `transactionsByAccount`
+- `transactionsBySecurity`
+- `transactionsByAccountSecurity`
+- `accountPortfolioJoin`
+- `accountActivityJoin`
+- `accountSnapshot`
 
-`bench:prepare` also writes `monitor-input/transactions.txt` for standalone transaction document read testing. When `REDIS_URL` is available, it waits for `idx:transactions` to finish backfilling, pulls real transaction keys from Redis, and writes `JSON.GET txn:... $` commands. If Redis is configured but transaction keys cannot be loaded, the script fails instead of silently changing the benchmark into an `FT.SEARCH` workload. Without Redis access, it falls back to transaction-index searches with `FT.SEARCH idx:transactions` so monitor files can still be generated offline.
+The newer `transactionsByComposite` UI pattern remains available in the workbench but is not part of this 12-query concurrent profile.
 
-Useful transaction-read preparation knobs:
+Each query runner obtains valid seeded identifiers from `/api/samples`, uses persistent HTTP connections, and writes target rate, achieved rate, latency percentiles, errors, and response throughput to `memtier-output/query-<pattern>.json`. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
+
+Useful tuning knobs:
 
 ```text
-MEMTIER_TRANSACTION_KEYS=10000
-MEMTIER_TRANSACTION_INDEX_WAIT_MS=600000
-MEMTIER_TRANSACTION_INDEX_POLL_MS=5000
+QUERY_BASE_URL=http://127.0.0.1:3000
+QUERY_DEFAULT_TARGET_RPS=10000
+QUERY_JOIN_TARGET_RPS=50000
+QUERY_TEST_TIME=60
+QUERY_MAX_IN_FLIGHT=2000
 ```
 
-The default target comes from:
-
-```text
-MEMTIER_THREADS=8
-MEMTIER_CLIENTS=100
-MEMTIER_POSITIONS_RATE_PER_CONNECTION=188
-
-8 * 100 * 188 = 150,400 positionsByAccount reads/sec
-```
-
-`MEMTIER_PIPELINE=64` helps keep requests in flight, but it is not part of the target-rate multiplication.
+The 230,000 ops/sec concurrent target is higher than the current Terraform throughput default of 180,000 ops/sec, so an unchanged Redis Cloud deployment may throttle or miss the requested rates. The result files preserve achieved throughput rather than treating the configured target as success.
 
 ### AWS us-west-2 Runner
 
-For a cleaner Redis Cloud benchmark, run memtier from AWS `us-west-2` near the database instead of from a laptop:
+For a cleaner Redis Cloud benchmark, run the query app and load generators from AWS `us-west-2` near the database instead of from a laptop:
 
 ```sh
 cd infra/aws-load-runner
@@ -306,7 +321,7 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, starts the Next.js query workbench on port `3000`, then runs `bench:positions-by-account` and atomic `bench:trade-writes` concurrently through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
+The helper copies the current repo and `.env.local` to the EC2 host, starts the Next.js query workbench on port `3000`, and runs all 12 query tests plus trade writes through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
 
 ## Initial Load Profile
 
@@ -372,14 +387,14 @@ The trade-write workload emits `FCALL apply_transaction` commands with unique tr
 npm run bench:trade-writes
 ```
 
-The target is:
+The default 30,000 writes/sec target is divided evenly across the configured memtier connections:
 
 ```text
-MEMTIER_THREADS=8
-MEMTIER_CLIENTS=100
-MEMTIER_TRADE_RATE_PER_CONNECTION=38
+MEMTIER_TRADE_TARGET_RPS=30000
+MEMTIER_TRADE_THREADS=4
+MEMTIER_TRADE_CLIENTS=50
 
-8 * 100 * 38 = 30,400 trade writes/sec
+30000 / (4 * 50) = 150 writes/sec per connection
 ```
 
 Install `memtier_benchmark` before running trade writes. The wrapper loads `.env.local` and derives its Redis connection settings from `REDIS_URL`. For TLS Redis Cloud endpoints, it passes `--tls-skip-verify` by default because macOS memtier builds may not use the system Keychain CA store. Set `MEMTIER_TLS_CACERT=/path/to/ca-bundle.pem` to verify with an explicit CA bundle.
@@ -410,9 +425,8 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` commands to hydrate related JSON rows across Redis Cluster slots.
 - Redis is not used as a relational SQL join planner.
 - Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
-- The primary load-test target is 180,000 transaction-data operations per second, split into 150,000 positionsByAccount reads/sec and 30,000 atomic trade writes/sec.
+- The concurrent load-test target is 230,000 operations per second: two joins at 50,000 reads/sec each, ten other queries at 10,000 reads/sec each, and 30,000 atomic trade writes/sec.
 - Runtime writes and the trade-write load test call the atomic `apply_transaction` Redis Function; raw `JSON.SET` is reserved for historical batch loading.
-- `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.
 - The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 180,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.
 - Use the Terraform `redis_tls` output rather than assuming TLS mode; Pro/Flexible and Essentials deployments can differ.

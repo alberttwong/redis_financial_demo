@@ -35,6 +35,7 @@ export type PositionRow = {
   quantity: number;
   market_value: number;
   as_of_date: string;
+  projection_version: number;
   payload: string;
 };
 

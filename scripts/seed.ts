@@ -1,7 +1,8 @@
 import { faker } from "@faker-js/faker";
 import { performance } from "node:perf_hooks";
+import { rebuildAccountSnapshot } from "../src/lib/account-snapshots";
 import { createIndexes, dropIndexes } from "../src/lib/indexes";
-import { jsonGet, jsonMGet, jsonSet, jsonSetCommand } from "../src/lib/json";
+import { jsonMGet, jsonSetCommand } from "../src/lib/json";
 import { getSeedConfig } from "../src/lib/config";
 import {
   makeAccount,
@@ -10,10 +11,9 @@ import {
   makeTransactionForSequence,
   seedFaker
 } from "../src/lib/data";
-import { accountKey, positionKey, securityKey, snapshotKey, transactionKey } from "../src/lib/keys";
-import { positionsByAccount, transactionsSearch } from "../src/lib/queries";
+import { accountKey, positionKey, securityKey, transactionKey } from "../src/lib/keys";
 import { closeRedisClient, getRedisClient } from "../src/lib/redis";
-import type { AccountRow, AccountSnapshot, PositionRow, SecurityRow, TransactionRow } from "../src/lib/types";
+import type { AccountRow, SecurityRow } from "../src/lib/types";
 
 type SeedTarget = "accounts" | "securities" | "positions" | "transactions" | "snapshots" | "all";
 type AccountRef = Pick<AccountRow, "account_id">;
@@ -243,38 +243,6 @@ async function loadSecurityLookup(): Promise<Map<string, Omit<SecurityRow, "payl
   return lookup;
 }
 
-async function buildSnapshot(account: AccountRef, securityByNo: Map<string, Omit<SecurityRow, "payload">>): Promise<boolean> {
-  const client = await getRedisClient();
-  const config = getSeedConfig();
-  const existingAccount = await jsonGet<AccountRow>(client, accountKey(account.account_id));
-  if (!existingAccount) return false;
-
-  const [positions, transactions] = await Promise.all([
-    positionsByAccount({ client }, account.account_id),
-    transactionsSearch({ client }, { accountId: account.account_id, limit: Math.min(config.transactionCount, 200) })
-  ]);
-
-  const snapshotPositions: AccountSnapshot["positions"] = positions.data.map((position: PositionRow) => ({
-    ...stripPayload(position),
-    security: securityByNo.get(position.security_no)
-  }));
-
-  const snapshot: AccountSnapshot = {
-    _id: account.account_id,
-    account_id: account.account_id,
-    generated_at: new Date().toISOString(),
-    account: existingAccount,
-    position_count: positions.result_count,
-    transaction_count: transactions.result_count,
-    total_market_value: positions.data.reduce((sum: number, position: PositionRow) => sum + position.market_value, 0),
-    recent_transactions: transactions.data.slice(0, 200).map((transaction: TransactionRow) => stripPayload(transaction)),
-    positions: snapshotPositions
-  };
-
-  await jsonSet(client, snapshotKey(account.account_id), snapshot);
-  return true;
-}
-
 async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<boolean>): Promise<number> {
   let nextIndex = 0;
   let completed = 0;
@@ -303,11 +271,19 @@ async function mapWithConcurrency<T>(items: T[], concurrency: number, worker: (i
 
 async function seedSnapshots(): Promise<number> {
   const config = getSeedConfig();
+  const client = await getRedisClient();
   const accounts = makeAccountRefs();
   const securityByNo = await loadSecurityLookup();
 
   console.log("snapshots: using concurrency " + config.snapshotConcurrency);
-  return mapWithConcurrency(accounts, config.snapshotConcurrency, (account) => buildSnapshot(account, securityByNo));
+  return mapWithConcurrency(accounts, config.snapshotConcurrency, async (account) =>
+    Boolean(
+      await rebuildAccountSnapshot(client, account.account_id, {
+        securityByNo,
+        transactionLimit: Math.min(config.transactionCount, 200)
+      })
+    )
+  );
 }
 
 async function ensureIndexes(): Promise<void> {

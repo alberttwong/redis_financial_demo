@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
+import { refreshAccountSnapshot } from "@/lib/account-snapshots";
 import { accountKey, securityKey, transactionDocumentId } from "@/lib/keys";
 import { jsonGet } from "@/lib/json";
 import { getRedisClient } from "@/lib/redis";
@@ -55,12 +56,20 @@ export async function POST(request: NextRequest) {
       amount,
       payload
     };
-    const result = await applyTransaction(client, transaction);
+    const applied = await applyTransaction(client, transaction);
+    const snapshot = await refreshAccountSnapshot(client, {
+      account,
+      security,
+      transaction,
+      position: applied.position_projection
+    });
+    const { position_projection: _positionProjection, ...result } = applied;
 
     return NextResponse.json(
       {
         transaction: { ...transaction, payload: undefined },
-        result
+        result,
+        snapshot
       },
       { status: result.status === "inserted" ? 201 : 200 }
     );

@@ -248,47 +248,33 @@ The snapshot can include:
 
 The UI should compare runtime join timing against materialized snapshot timing so the demo shows the Redis-native approach for replacing high-volume Postgres read joins.
 
-## `memtier_benchmark` Workload Profiles
+## Query And Trade-Write Load Profiles
 
-Use `redis/memtier_benchmark` through Docker or a local installation.
+The 12 query-pattern profiles call `/api/query` so each load test follows the same direct lookup, secondary search, hydration, join, and response path as the browser workbench. The default concurrent targets are:
 
-Benchmark scripts should target Redis Cloud using:
+- `accountPortfolioJoin`: 50,000 reads/sec
+- `accountActivityJoin`: 50,000 reads/sec
+- Ten other query patterns: 10,000 reads/sec each
+- Atomic transaction writes: 30,000 writes/sec
 
-- Redis Cloud host
-- Redis Cloud port
-- TLS
-- Username/password if required
-- Tunable threads
-- Tunable clients
-- Tunable pipeline depth
-- Tunable rate limiting
+The combined target is 230,000 operations/sec. Query runners use persistent HTTP connections and valid seeded identifiers from `/api/samples`. The transaction writer uses `memtier_benchmark` with `FCALL apply_transaction`, unique transaction keys, tunable threads, clients, pipeline depth, and a total target rate that is divided across connections.
 
-The default target is about 180,000 transaction-data operations per second. In the dedicated transaction profile, this is calculated as `threads * clients * MEMTIER_TRANSACTION_RATE_PER_CONNECTION`, with defaults `4 * 50 * 900 = 180,000`.
+`transactionsByComposite` remains a workbench query but is outside this 12-query concurrent load profile.
 
-Create separate profiles:
+Large-document query results should report both:
 
-- Compact account `JSON.GET` reads
-- Transaction-data reads using live `JSON.GET txn:... $` commands when Redis is available
-- Secondary-index `FT.SEARCH` lookups
-- Mixed account/security/position/transaction lookup traffic
-- Runtime join support commands through monitor-input replay where practical
-- Materialized account snapshot reads
-- Large 400KB position/transaction document transfer tests
-
-Large-document tests should report both:
-
-- Operations per second
-- Network throughput in MB/sec
+- Requests per second
+- Response throughput in MB/sec
 
 Benchmark output should capture:
 
-- Achieved ops/sec
+- Target and achieved ops/sec
 - p50 latency
 - p99 latency
 - p99.9 latency
 - Error rate
 - Test duration
-- Workload profile
+- Workload or query pattern
 - Redis Cloud endpoint metadata without secrets
 
 ## Validation And Smoke Tests
