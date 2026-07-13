@@ -12,6 +12,22 @@ mkdir -p memtier-output
 
 npm run redis:functions
 
+trade_target_rps="${MEMTIER_TRADE_TARGET_RPS:-30000}"
+trade_threads="${MEMTIER_TRADE_THREADS:-4}"
+trade_clients="${MEMTIER_TRADE_CLIENTS:-50}"
+for value in "$trade_target_rps" "$trade_threads" "$trade_clients"; do
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Trade target, threads, and clients must be positive integers." >&2
+    exit 1
+  fi
+done
+trade_connections=$((trade_threads * trade_clients))
+if ((trade_target_rps % trade_connections != 0)); then
+  echo "MEMTIER_TRADE_TARGET_RPS must be divisible by MEMTIER_TRADE_THREADS * MEMTIER_TRADE_CLIENTS." >&2
+  exit 1
+fi
+trade_rate_per_connection=$((trade_target_rps / trade_connections))
+
 trade_run_id="${MEMTIER_TRADE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 trade_date="${MEMTIER_TRADE_DATE:-$(date -u +%Y-%m-%d)}"
 trade_date_epoch="$(node -e 'console.log(Date.parse(`${process.argv[1]}T00:00:00.000Z`))' "$trade_date")"
@@ -53,6 +69,7 @@ position_json_arg="$(
       quantity: 0,
       market_value: 0,
       as_of_date: tradeDate,
+      projection_version: 0,
       payload: ""
     };
     process.stdout.write(JSON.stringify(JSON.stringify(row)));
@@ -70,15 +87,20 @@ if [[ "${REDIS_TLS:-false}" == "true" ]]; then
   fi
 fi
 
+if [[ -n "${LOAD_TEST_START_AT_EPOCH_MS:-}" ]]; then
+  node -e 'const waitMs = Number(process.argv[1]) - Date.now(); if (waitMs > 0) setTimeout(() => {}, waitMs);' \
+    "$LOAD_TEST_START_AT_EPOCH_MS"
+fi
+
 memtier_benchmark \
   --server "$REDIS_HOST" \
   --port "$REDIS_PORT" \
   --authenticate "$REDIS_PASSWORD" \
   "${tls_args[@]}" \
-  --threads "${MEMTIER_THREADS:-8}" \
-  --clients "${MEMTIER_CLIENTS:-100}" \
-  --pipeline "${MEMTIER_PIPELINE:-64}" \
-  --rate-limiting "${MEMTIER_TRADE_RATE_PER_CONNECTION:-38}" \
+  --threads "$trade_threads" \
+  --clients "$trade_clients" \
+  --pipeline "${MEMTIER_TRADE_PIPELINE:-64}" \
+  --rate-limiting "$trade_rate_per_connection" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
   --key-prefix "txn:{pos:A00000001:SPX000001:LOAD}:load:${trade_run_id}:" \
   --key-minimum 1 \

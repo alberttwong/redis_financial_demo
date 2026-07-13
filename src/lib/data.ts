@@ -78,7 +78,8 @@ export function makePosition(account: AccountRef, security: PositionSecurityRef,
       acct_type_code: acctTypeCode,
       quantity,
       market_value: marketValue,
-      as_of_date: new Date().toISOString().slice(0, 10)
+      as_of_date: new Date().toISOString().slice(0, 10),
+      projection_version: 0
     },
     targetBytes
   );

@@ -10,12 +10,16 @@ export type ApplyTransactionResult = {
   status: "inserted" | "duplicate";
   quantity_delta: number;
   position_quantity: number | null;
+  position_projection: Omit<PositionRow, "payload"> | null;
   transaction_key: string;
   position_key: string;
   market_value_recalculation_required: boolean;
 };
 
-type FunctionReply = Pick<ApplyTransactionResult, "status" | "quantity_delta" | "position_quantity">;
+type FunctionReply = Pick<
+  ApplyTransactionResult,
+  "status" | "quantity_delta" | "position_quantity" | "position_projection"
+>;
 
 export async function applyTransaction(
   client: RedisClientType,
@@ -43,6 +47,7 @@ export async function applyTransaction(
     quantity: 0,
     market_value: 0,
     as_of_date: transaction.trade_date,
+    projection_version: 0,
     payload: ""
   };
 
@@ -135,10 +140,33 @@ function parseFunctionReply(raw: unknown): FunctionReply {
   if (parsed.position_quantity !== null && typeof parsed.position_quantity !== "number") {
     throw new Error("apply_transaction returned an invalid position_quantity");
   }
+  const positionProjection = parsePositionProjection(parsed.position_projection);
 
   return {
     status: parsed.status,
     quantity_delta: parsed.quantity_delta,
-    position_quantity: parsed.position_quantity ?? null
+    position_quantity: parsed.position_quantity ?? null,
+    position_projection: positionProjection
   };
+}
+
+function parsePositionProjection(value: unknown): Omit<PositionRow, "payload"> | null {
+  if (value === null || value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("apply_transaction returned an invalid position_projection");
+  }
+
+  const position = value as Partial<Omit<PositionRow, "payload">>;
+  for (const field of ["_id", "account_id", "security_id", "security_no", "acct_type_code", "as_of_date"] as const) {
+    if (typeof position[field] !== "string" || position[field].length === 0) {
+      throw new Error(`apply_transaction returned an invalid position_projection.${field}`);
+    }
+  }
+  for (const field of ["quantity", "market_value", "projection_version"] as const) {
+    if (typeof position[field] !== "number" || !Number.isFinite(position[field])) {
+      throw new Error(`apply_transaction returned an invalid position_projection.${field}`);
+    }
+  }
+
+  return position as Omit<PositionRow, "payload">;
 }

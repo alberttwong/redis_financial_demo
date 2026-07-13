@@ -33,7 +33,22 @@ test("applyTransaction calls the atomic Redis Function with both keys", async ()
   const client = {
     async sendCommand(input: string[]) {
       command = input;
-      return JSON.stringify({ status: "inserted", quantity_delta: 10, position_quantity: 25 });
+      return JSON.stringify({
+        status: "inserted",
+        quantity_delta: 10,
+        position_quantity: 25,
+        position_projection: {
+          _id: "A1|SPX1|CASH",
+          account_id: "A1",
+          security_id: "SEC1",
+          security_no: "SPX1",
+          acct_type_code: "CASH",
+          quantity: 25,
+          market_value: 1000,
+          as_of_date: "2026-07-13",
+          projection_version: 3
+        }
+      });
     }
   } as unknown as RedisClientType;
 
@@ -50,5 +65,6 @@ test("applyTransaction calls the atomic Redis Function with both keys", async ()
   assert.equal(result.status, "inserted");
   assert.equal(result.quantity_delta, 10);
   assert.equal(result.position_quantity, 25);
+  assert.equal(result.position_projection?.projection_version, 3);
   assert.equal(result.market_value_recalculation_required, true);
 });
