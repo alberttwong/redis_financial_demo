@@ -1,6 +1,6 @@
 # Redis Financial Demo
 
-Demo app for SQL-batched financial data in Redis Cloud 8.4. The app stores flat SQL-friendly JSON rows in Redis Cloud, creates narrow Redis Query Engine indexes, exposes timed UI/API query examples, and includes Faker seeders plus `memtier_benchmark` workload helpers.
+Demo app for SQL-batched financial data in Redis Cloud 8.4. The app stores flat SQL-friendly JSON rows in Redis Cloud, creates narrow Redis Query Engine indexes, exposes timed UI/API query examples, and includes Faker seeders plus `memtier_benchmark` workload helpers, including atomic trade writes.
 
 GitHub repository: <https://github.com/alberttwong/redis_financial_demo>
 
@@ -48,7 +48,8 @@ The browser workbench at `/` calls `/api/query` with a `pattern` parameter. It s
 | Secondary | `securityByNo` | Security by No | `security_no` | `FT.SEARCH idx:securities @security_no:{...}` then pipelined `JSON.GET` |
 | Primary | `positionByComposite` | Position composite | `account_id`, `security_no`, `acct_type_code` | `JSON.GET pos:{account_id}:{security_no}:{acct_type_code} $` |
 | Secondary | `positionsByAccount` | Positions by account | `account_id` | `FT.SEARCH idx:positions @account_id:{...} LIMIT 0 500` then pipelined `JSON.GET` |
-| Primary | `transactionByComposite` | Transaction composite | `account_id`, `security_id`, `trade_date`, `acct_type_code` | `JSON.GET txn:{account_id}:{security_id}:{trade_date}:{acct_type_code} $` |
+| Primary | `transactionById` | Transaction by ID | `account_id`, `security_no`, `acct_type_code`, `transaction_id` | `JSON.GET txn:{pos:account_id:security_no:acct_type_code}:{transaction_id} $` |
+| Secondary | `transactionsByComposite` | Transactions by composite | `account_id`, `security_id`, `trade_date`, `acct_type_code` | `FT.SEARCH idx:transactions` across the four indexed fields, then pipelined `JSON.GET` |
 | Secondary | `transactionsByAccount` | Transactions by account | `account_id`, `limit` | `FT.SEARCH idx:transactions @account_id:{...}` then pipelined `JSON.GET` |
 | Secondary | `transactionsBySecurity` | Transactions by security | `security_id`, `limit` | `FT.SEARCH idx:transactions @security_id:{...}` then pipelined `JSON.GET` |
 | Secondary | `transactionsByAccountSecurity` | Transactions by account + security | `account_id`, `security_id`, `limit` | `FT.SEARCH idx:transactions @account_id:{...} @security_id:{...}` then pipelined `JSON.GET` |
@@ -59,10 +60,39 @@ The browser workbench at `/` calls `/api/query` with a `pattern` parameter. It s
 The API accepts:
 
 ```text
-/api/query?pattern=<pattern>&account_id=...&security_id=...&security_no=...&acct_type_code=...&trade_date=...&limit=100
+/api/query?pattern=<pattern>&account_id=...&security_id=...&security_no=...&acct_type_code=...&trade_date=...&transaction_id=...&limit=100
 ```
 
 Responses include `data`, `timing`, `result_count`, `payload_bytes`, and the Redis `commands` used for the query.
+
+## Atomic Transaction Writes
+
+Runtime transaction inserts go through the `apply_transaction` Redis Function instead of calling `JSON.SET` directly. The function atomically rejects duplicate transaction keys, writes the transaction document, and applies the corresponding quantity change to the position with a partial RedisJSON update.
+
+Load the function library with:
+
+```sh
+npm run redis:functions
+```
+
+`seed:initial-load` loads the library automatically after the historical base rows. Historical `seed:transactions` writes remain a non-projecting batch-load path because the accompanying positions are already loaded as as-of state; replaying those transactions into those positions would double count them.
+
+The runtime API accepts `POST /api/transactions`. `transaction_id` and `trade_date` are optional; the API generates them when omitted. `security_no` is resolved from the stored security document so callers cannot create a transaction/position identifier mismatch.
+
+```sh
+curl -X POST http://localhost:3000/api/transactions \
+  -H 'content-type: application/json' \
+  -d '{
+    "account_id": "A00000001",
+    "security_id": "SEC00000001",
+    "acct_type_code": "CASH",
+    "transaction_type": "BUY",
+    "quantity": 10,
+    "amount": 1000
+  }'
+```
+
+Quantity rules are `BUY = +quantity`, `SELL = -quantity`, and no quantity change for `DIVIDEND`, `INTEREST`, `TRANSFER`, or `FEE`. Reusing the same `transaction_id` for the same position identity returns `duplicate` without applying the quantity twice. Market value is deliberately not derived from trade amount; a pricing/revaluation process must refresh it. Existing account snapshots also remain unchanged until the snapshot builder runs again.
 
 On startup, the web workbench calls `/api/samples` to discover working seeded values for account, security, position, and transaction examples. This keeps secondary-index and composite-key examples from defaulting to IDs that do not exist in the current Redis Cloud dataset.
 
@@ -107,6 +137,7 @@ erDiagram
     POSITIONS {
         string _id PK "account_id|security_no|acct_type_code"
         string account_id FK
+        string security_id FK
         string security_no FK
         string acct_type_code
         number quantity
@@ -116,9 +147,11 @@ erDiagram
     }
 
     TRANSACTIONS {
-        string _id PK "account_id|security_id|trade_date|acct_type_code"
+        string _id PK "account_id|security_id|transaction_id"
+        string transaction_id UK
         string account_id FK
         string security_id FK
+        string security_no FK
         string trade_date
         number trade_date_epoch
         string acct_type_code
@@ -147,7 +180,7 @@ Redis key mapping:
 | `accounts` | `acct:{account_id}:info` | Direct `JSON.GET` by account id |
 | `securities` | `sec:{security_id}:info` | Direct lookup or search by `security_no` |
 | `positions` | `pos:{account_id}:{security_no}:{acct_type_code}` | Composite lookup or search by `account_id` |
-| `transactions` | `txn:{account_id}:{security_id}:{trade_date}:{acct_type_code}` | Composite lookup, search by `account_id`, `security_id`, or both |
+| `transactions` | `txn:{pos:account_id:security_no:acct_type_code}:{transaction_id}` | Direct lookup by transaction id, or search by `account_id`, `security_id`, or both |
 | `account_snapshots` | `acct-snapshot:{account_id}` | One-key hot read model for account join views |
 
 ## Data Flows
@@ -193,18 +226,20 @@ flowchart TD
 
 ### Typical Stock Trading Change Flow
 
-Transaction rows are the change history. Position rows are the current or as-of holding state derived from transaction activity.
+Transaction rows are the change history. Position rows are the current or as-of holding state derived from transaction activity. The transaction key uses the complete position key as its Redis Cluster hash tag. Redis therefore hashes both keys from the same bytes and the Function can update an existing or newly-created position atomically in one slot.
 
 ```mermaid
 flowchart LR
     ORDER["Trade/order event"]
-    TXN["Insert transaction row"]
-    POS["Update or recalculate position row"]
+    FCALL["FCALL apply_transaction"]
+    TXN["JSON.SET transaction if new"]
+    POS["JSON.NUMINCRBY position quantity"]
     SNAP["Refresh account snapshot"]
     READ["Account / portfolio read"]
 
-    ORDER --> TXN
-    TXN --> POS
+    ORDER --> FCALL
+    FCALL --> TXN
+    FCALL --> POS
     POS --> SNAP
     TXN --> SNAP
     SNAP --> READ
@@ -212,7 +247,7 @@ flowchart LR
 
 ## Load Testing
 
-The primary load test target is **180,000 transaction-data operations per second**, split into **150,000 `positionsByAccount` reads/sec** and **30,000 trade writes/sec** when `bench:concurrent` runs. Install `memtier_benchmark` first if it is not already on `PATH`.
+The primary load test target is **180,000 transaction-data operations per second**, split into **150,000 `positionsByAccount` reads/sec** and **30,000 atomic trade writes/sec** when `bench:concurrent` runs. Install `memtier_benchmark` first if it is not already on `PATH`.
 
 ```sh
 brew install memtier_benchmark
@@ -271,7 +306,7 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, starts the Next.js query workbench on port `3000`, then runs `bench:positions-by-account` and `bench:trade-writes` concurrently through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
+The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, starts the Next.js query workbench on port `3000`, then runs `bench:positions-by-account` and atomic `bench:trade-writes` concurrently through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
 
 ## Initial Load Profile
 
@@ -331,10 +366,9 @@ Account rows are compact metadata documents without synthetic payloads. Larger p
 
 ## Trade Write Load Testing
 
-The trade-write workload randomly selects accounts and securities from the configured seed population, generates transaction JSON rows, and drives them through Redis as `JSON.SET txn:... $ ...` commands. With the initial-load profile, trades are distributed across 5,000 accounts and 3,000 securities.
+The trade-write workload emits `FCALL apply_transaction` commands with unique transaction keys. It writes each new transaction and atomically updates one load-test position, so every measured request executes the projection path rather than becoming an idempotent replay.
 
 ```sh
-npm run bench:prepare
 npm run bench:trade-writes
 ```
 
@@ -348,7 +382,9 @@ MEMTIER_TRADE_RATE_PER_CONNECTION=38
 8 * 100 * 38 = 30,400 trade writes/sec
 ```
 
-Trade writes use memtier-generated keys with a run-specific `txn:load:<run-id>:` prefix and parallel sequential key allocation, so each write operation creates a unique transaction key during the run instead of replaying a fixed monitor-input slice. `MEMTIER_TRADE_RUN_ID`, `MEMTIER_TRADE_KEY_MAXIMUM`, and `MEMTIER_TRADE_PAYLOAD_BYTES` tune the generated key space and JSON payload size.
+Install `memtier_benchmark` before running trade writes. The wrapper loads `.env.local` and derives its Redis connection settings from `REDIS_URL`. For TLS Redis Cloud endpoints, it passes `--tls-skip-verify` by default because macOS memtier builds may not use the system Keychain CA store. Set `MEMTIER_TLS_CACERT=/path/to/ca-bundle.pem` to verify with an explicit CA bundle.
+
+Trade writes use memtier-generated keys with a run-specific `txn:{pos:A00000001:SPX000001:LOAD}:load:<run-id>:` prefix and parallel sequential key allocation. Each write inserts a new transaction and atomically updates `pos:A00000001:SPX000001:LOAD`. `MEMTIER_TRADE_RUN_ID`, `MEMTIER_TRADE_KEY_MAXIMUM`, and `MEMTIER_TRADE_PAYLOAD_BYTES` tune the generated key space and JSON payload size.
 
 ## Redis Cloud
 
@@ -374,8 +410,8 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` commands to hydrate related JSON rows across Redis Cluster slots.
 - Redis is not used as a relational SQL join planner.
 - Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
-- The primary load test target is 180,000 transaction-data operations per second, split into 150,000 positionsByAccount reads/sec and 30,000 trade writes/sec.
-- The trade-write load test writes unique transaction keys under `txn:load:<run-id>:` with `JSON.SET`.
+- The primary load-test target is 180,000 transaction-data operations per second, split into 150,000 positionsByAccount reads/sec and 30,000 atomic trade writes/sec.
+- Runtime writes and the trade-write load test call the atomic `apply_transaction` Redis Function; raw `JSON.SET` is reserved for historical batch loading.
 - `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.
 - The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 180,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.

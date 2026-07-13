@@ -65,6 +65,7 @@ Each SQL row becomes one flat Redis JSON document with SQL-friendly top-level fi
 - `account_id`
 - `security_id`
 - `security_no`
+- `transaction_id`
 - `acct_type_code`
 - `trade_date`
 - `advisor_id`
@@ -133,7 +134,7 @@ Primary Redis keys:
 acct:{account_id}:info
 sec:{security_id}:info
 pos:{account_id}:{security_no}:{acct_type_code}
-txn:{account_id}:{security_id}:{trade_date}:{acct_type_code}
+txn:{pos:account_id:security_no:acct_type_code}:{transaction_id}
 acct-snapshot:{account_id}
 ```
 
@@ -144,7 +145,7 @@ Access pattern mapping:
 | Account Info | `acct:{account_id}:info` | `account_id` | None |
 | Security Info | `sec:{security_id}:info` | `security_id` | `security_no` |
 | Position | `pos:{account_id}:{security_no}:{acct_type_code}` | Composite key | `account_id` |
-| Transaction | `txn:{account_id}:{security_id}:{trade_date}:{acct_type_code}` | Composite key | `account_id`, `security_id`, combined filters |
+| Transaction | `txn:{pos:account_id:security_no:acct_type_code}:{transaction_id}` | Position identity + transaction id | `account_id`, `security_id`, combined filters |
 
 Use direct `JSON.GET` for primary and composite-key reads.
 
@@ -174,7 +175,7 @@ Individual lookup examples:
 - Security by `security_no`
 - Position by composite key
 - Position by `account_id`
-- Transaction by composite key
+- Transaction by position identity and `transaction_id`
 - Transaction by `account_id`
 - Transaction by `security_id`
 - Transaction by combined `account_id` and `security_id`

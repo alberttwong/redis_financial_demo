@@ -8,7 +8,8 @@ import {
   positionsByAccount,
   securityById,
   securityByNo,
-  transactionByComposite,
+  transactionById,
+  transactionsByComposite,
   transactionsSearch
 } from "@/lib/queries";
 import { getRedisClient } from "@/lib/redis";
@@ -46,6 +47,7 @@ async function runPattern(
   const securityNo = params.get("security_no") ?? "SPX000001";
   const acctTypeCode = params.get("acct_type_code") ?? "CASH";
   const tradeDate = params.get("trade_date") ?? new Date().toISOString().slice(0, 10);
+  const transactionId = params.get("transaction_id") ?? "sample-transaction-id";
   const limit = Number.parseInt(params.get("limit") ?? "100", 10);
   const ctx = { client, startedAt };
 
@@ -60,8 +62,10 @@ async function runPattern(
       return positionByComposite(ctx, accountId, securityNo, acctTypeCode);
     case "positionsByAccount":
       return positionsByAccount(ctx, accountId);
-    case "transactionByComposite":
-      return transactionByComposite(ctx, accountId, securityId, tradeDate, acctTypeCode);
+    case "transactionById":
+      return transactionById(ctx, accountId, securityNo, acctTypeCode, transactionId);
+    case "transactionsByComposite":
+      return transactionsByComposite(ctx, accountId, securityId, tradeDate, acctTypeCode);
     case "transactionsByAccount":
       return transactionsSearch(ctx, { accountId, limit });
     case "transactionsBySecurity":

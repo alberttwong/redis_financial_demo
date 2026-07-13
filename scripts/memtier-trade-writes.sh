@@ -10,10 +10,13 @@ set -euo pipefail
 
 mkdir -p memtier-output
 
+npm run redis:functions
+
 trade_run_id="${MEMTIER_TRADE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 trade_date="${MEMTIER_TRADE_DATE:-$(date -u +%Y-%m-%d)}"
 trade_date_epoch="$(node -e 'console.log(Date.parse(`${process.argv[1]}T00:00:00.000Z`))' "$trade_date")"
 trade_payload_bytes="${MEMTIER_TRADE_PAYLOAD_BYTES:-1024}"
+position_key='pos:A00000001:SPX000001:LOAD'
 trade_json_arg="$(
   node -e '
     const target = Number(process.argv[1]);
@@ -21,8 +24,10 @@ trade_json_arg="$(
     const tradeDateEpoch = Number(process.argv[3]);
     const row = {
       _id: "__key__",
+      transaction_id: "__key__",
       account_id: "A00000001",
       security_id: "SEC00000001",
+      security_no: "SPX000001",
       trade_date: tradeDate,
       trade_date_epoch: tradeDateEpoch,
       acct_type_code: "LOAD",
@@ -36,7 +41,24 @@ trade_json_arg="$(
     process.stdout.write(JSON.stringify(JSON.stringify(row)));
   ' "$trade_payload_bytes" "$trade_date" "$trade_date_epoch"
 )"
-trade_command="JSON.SET __key__ $ ${trade_json_arg}"
+position_json_arg="$(
+  node -e '
+    const tradeDate = process.argv[1];
+    const row = {
+      _id: "A00000001|SPX000001|LOAD",
+      account_id: "A00000001",
+      security_id: "SEC00000001",
+      security_no: "SPX000001",
+      acct_type_code: "LOAD",
+      quantity: 0,
+      market_value: 0,
+      as_of_date: tradeDate,
+      payload: ""
+    };
+    process.stdout.write(JSON.stringify(JSON.stringify(row)));
+  ' "$trade_date"
+)"
+trade_command="FCALL apply_transaction 2 __key__ ${position_key} ${trade_json_arg} ${position_json_arg}"
 
 tls_args=()
 if [[ "${REDIS_TLS:-false}" == "true" ]]; then
@@ -58,7 +80,7 @@ memtier_benchmark \
   --pipeline "${MEMTIER_PIPELINE:-64}" \
   --rate-limiting "${MEMTIER_TRADE_RATE_PER_CONNECTION:-38}" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
-  --key-prefix "txn:load:${trade_run_id}:" \
+  --key-prefix "txn:{pos:A00000001:SPX000001:LOAD}:load:${trade_run_id}:" \
   --key-minimum 1 \
   --key-maximum "${MEMTIER_TRADE_KEY_MAXIMUM:-10000000}" \
   --command "$trade_command" \

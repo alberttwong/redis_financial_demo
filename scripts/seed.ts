@@ -10,7 +10,7 @@ import {
   makeTransactionForSequence,
   seedFaker
 } from "../src/lib/data";
-import { accountKey, securityKey, snapshotKey } from "../src/lib/keys";
+import { accountKey, positionKey, securityKey, snapshotKey, transactionKey } from "../src/lib/keys";
 import { positionsByAccount, transactionsSearch } from "../src/lib/queries";
 import { closeRedisClient, getRedisClient } from "../src/lib/redis";
 import type { AccountRow, AccountSnapshot, PositionRow, SecurityRow, TransactionRow } from "../src/lib/types";
@@ -171,7 +171,7 @@ async function seedPositions(): Promise<number> {
       const security = securities[(accountIndex * config.positionsPerAccount + offset) % securities.length];
       const position = makePosition(account, security, config.positionBytes);
       batch.push({
-        key: "pos:" + position.account_id + ":" + position.security_no + ":" + position.acct_type_code,
+        key: positionKey(position.account_id, position.security_no, position.acct_type_code),
         value: position
       });
 
@@ -204,7 +204,12 @@ async function seedTransactions(): Promise<number> {
     const account = accounts[accountIndex];
     const security = securities[(accountIndex * 131 + sequence) % securities.length];
     const transaction = makeTransactionForSequence(account, security, sequence, securities.length, config.transactionBytes);
-    const key = "txn:" + transaction.account_id + ":" + transaction.security_id + ":" + transaction.trade_date + ":" + transaction.acct_type_code;
+    const key = transactionKey(
+      transaction.account_id,
+      transaction.security_no,
+      transaction.acct_type_code,
+      transaction.transaction_id
+    );
     batch.push({ key, value: transaction });
 
     if (batch.length >= config.batchSize) {

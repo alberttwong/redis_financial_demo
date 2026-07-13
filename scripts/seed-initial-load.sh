@@ -45,3 +45,4 @@ Initial load profile:
 EOF
 
 node --import tsx scripts/seed.ts all
+npm run redis:functions
