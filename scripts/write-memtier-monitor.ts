@@ -1,9 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { getSeedConfig } from "../src/lib/config";
+import { INDEXES } from "../src/lib/indexes";
 import { accountKey, snapshotKey, transactionKey, transactionId } from "../src/lib/keys";
 import { withSizedPayload } from "../src/lib/payload";
 import { closeRedisClient, getRedisClient } from "../src/lib/redis";
 import { searchKeys } from "../src/lib/search";
+import { tagEquals } from "../src/lib/tag";
 import type { TransactionRow } from "../src/lib/types";
 
 const TRANSACTION_INDEX = "idx:transactions";
@@ -31,6 +33,7 @@ async function main() {
     })
   ];
 
+  const positionsByAccountLines = makePositionsByAccountLines(config.accountCount);
   const transactionLines = await makeTransactionLines(config.accountCount);
   const tradeWriteLines = makeTradeWriteLines({
     accountCount: config.accountCount,
@@ -42,15 +45,24 @@ async function main() {
 
   await writeFile("monitor-input/account-reads.txt", accountLines.join("\n") + "\n");
   await writeFile("monitor-input/snapshot-reads.txt", snapshotLines.join("\n") + "\n");
+  await writeFile("monitor-input/positions-by-account.txt", positionsByAccountLines.join("\n") + "\n");
   await writeFile("monitor-input/transactions.txt", transactionLines.join("\n") + "\n");
   await writeFile("monitor-input/trade-writes.txt", tradeWriteLines.join("\n") + "\n");
   await writeFile("monitor-input/mixed.txt", mixedLines.join("\n") + "\n");
 
   console.log("Wrote monitor-input/account-reads.txt");
   console.log("Wrote monitor-input/snapshot-reads.txt");
+  console.log("Wrote monitor-input/positions-by-account.txt");
   console.log("Wrote monitor-input/transactions.txt");
   console.log("Wrote monitor-input/trade-writes.txt");
   console.log("Wrote monitor-input/mixed.txt");
+}
+
+function makePositionsByAccountLines(accountCount: number): string[] {
+  return Array.from({ length: Math.min(accountCount, 1000) }, (_, index) => {
+    const accountId = `A${String((index % accountCount) + 1).padStart(8, "0")}`;
+    return `"FT.SEARCH" "${INDEXES.positions}" "${tagEquals("account_id", accountId)}" "NOCONTENT" "LIMIT" "0" "500" "DIALECT" "2"`;
+  });
 }
 
 async function makeTransactionLines(accountCount: number): Promise<string[]> {

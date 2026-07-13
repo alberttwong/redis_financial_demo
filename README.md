@@ -212,23 +212,25 @@ flowchart LR
 
 ## Load Testing
 
-The primary load test target is **180,000 transaction-data operations per second**, split into **150,000 transaction reads/sec** and **30,000 trade writes/sec** when `bench:concurrent` runs. Install `memtier_benchmark` first if it is not already on `PATH`.
+The primary load test target is **180,000 transaction-data operations per second**, split into **150,000 `positionsByAccount` reads/sec** and **30,000 trade writes/sec** when `bench:concurrent` runs. Install `memtier_benchmark` first if it is not already on `PATH`.
 
 ```sh
 brew install memtier_benchmark
 npm run bench:prepare
-npm run bench:transactions
+npm run bench:positions-by-account
 ```
 
-The transaction benchmark runs for 60 seconds by default. To make the duration explicit:
+The positions-by-account benchmark runs for 60 seconds by default. To make the duration explicit:
 
 ```sh
-MEMTIER_TEST_TIME=60 npm run bench:transactions
+MEMTIER_TEST_TIME=60 npm run bench:positions-by-account
 ```
 
 The benchmark wrappers load `.env.local` and derive `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, and `REDIS_TLS` from `REDIS_URL`, so the connection string remains the source of truth for memtier runs. For TLS Redis Cloud endpoints, the wrappers pass `--tls-skip-verify` by default because macOS memtier builds may not use the system Keychain CA store. Set `MEMTIER_TLS_CACERT=/path/to/ca-bundle.pem` to verify with an explicit CA bundle instead.
 
-`bench:prepare` writes `monitor-input/transactions.txt`. When `REDIS_URL` is available, it waits for `idx:transactions` to finish backfilling, pulls real transaction keys from Redis, and writes `JSON.GET txn:... $` commands. If Redis is configured but transaction keys cannot be loaded, the script fails instead of silently changing the benchmark into an `FT.SEARCH` workload. Without Redis access, it falls back to transaction-index searches with `FT.SEARCH idx:transactions` so monitor files can still be generated offline.
+`bench:prepare` writes `monitor-input/positions-by-account.txt` for the primary read benchmark. It replays the workbench `positionsByAccount` search shape as `FT.SEARCH idx:positions @account_id:{...} NOCONTENT LIMIT 0 500 DIALECT 2`.
+
+`bench:prepare` also writes `monitor-input/transactions.txt` for standalone transaction document read testing. When `REDIS_URL` is available, it waits for `idx:transactions` to finish backfilling, pulls real transaction keys from Redis, and writes `JSON.GET txn:... $` commands. If Redis is configured but transaction keys cannot be loaded, the script fails instead of silently changing the benchmark into an `FT.SEARCH` workload. Without Redis access, it falls back to transaction-index searches with `FT.SEARCH idx:transactions` so monitor files can still be generated offline.
 
 Useful transaction-read preparation knobs:
 
@@ -243,9 +245,9 @@ The default target comes from:
 ```text
 MEMTIER_THREADS=8
 MEMTIER_CLIENTS=100
-MEMTIER_TRANSACTION_RATE_PER_CONNECTION=188
+MEMTIER_POSITIONS_RATE_PER_CONNECTION=188
 
-8 * 100 * 188 = 150,400 transaction reads/sec
+8 * 100 * 188 = 150,400 positionsByAccount reads/sec
 ```
 
 `MEMTIER_PIPELINE=64` helps keep requests in flight, but it is not part of the target-rate multiplication.
@@ -269,7 +271,7 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, starts the Next.js query workbench on port `3000`, then runs `bench:transactions` and `bench:trade-writes` concurrently through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
+The helper copies the current repo and `.env.local` to the EC2 host, runs `bench:prepare`, starts the Next.js query workbench on port `3000`, then runs `bench:positions-by-account` and `bench:trade-writes` concurrently through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
 
 ## Initial Load Profile
 
@@ -372,7 +374,7 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` commands to hydrate related JSON rows across Redis Cluster slots.
 - Redis is not used as a relational SQL join planner.
 - Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
-- The primary load test target is 180,000 transaction-data operations per second, split into 150,000 transaction reads/sec and 30,000 trade writes/sec.
+- The primary load test target is 180,000 transaction-data operations per second, split into 150,000 positionsByAccount reads/sec and 30,000 trade writes/sec.
 - The trade-write load test writes unique transaction keys under `txn:load:<run-id>:` with `JSON.SET`.
 - `MEMTIER_PIPELINE` helps keep requests in flight but does not multiply the target request rate.
 - The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 180,000 operations per second using the Redis Cloud account's default payment method.
