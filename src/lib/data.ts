@@ -1,5 +1,12 @@
 import { faker } from "@faker-js/faker";
-import { accountKey, positionId, securityKey, transactionId } from "./keys";
+import {
+  accountKey,
+  positionId,
+  positionKey,
+  securityKey,
+  transactionDocumentId,
+  transactionKey
+} from "./keys";
 import { withSizedPayload } from "./payload";
 import { makeSp500Template } from "./sp500";
 import type { AccountRow, PositionRow, SecurityRow, TransactionRow } from "./types";
@@ -10,8 +17,8 @@ const acctTypeCodes = ["CASH", "MARGIN", "RETIREMENT", "ADVISORY"];
 const transactionTypes = ["BUY", "SELL", "DIVIDEND", "INTEREST", "TRANSFER", "FEE"];
 
 type AccountRef = Pick<AccountRow, "account_id">;
-type PositionSecurityRef = Pick<SecurityRow, "security_no">;
-type TransactionSecurityRef = Pick<SecurityRow, "security_id">;
+type PositionSecurityRef = Pick<SecurityRow, "security_id" | "security_no">;
+type TransactionSecurityRef = Pick<SecurityRow, "security_id" | "security_no">;
 
 export function seedFaker(seed: number): void {
   faker.seed(seed);
@@ -66,6 +73,7 @@ export function makePosition(account: AccountRef, security: PositionSecurityRef,
     {
       _id: id,
       account_id: account.account_id,
+      security_id: security.security_id,
       security_no: security.security_no,
       acct_type_code: acctTypeCode,
       quantity,
@@ -81,13 +89,16 @@ export function makeTransaction(account: AccountRef, security: TransactionSecuri
   const tradeDate = faker.date.recent({ days: 365 }).toISOString().slice(0, 10);
   const quantity = faker.number.float({ min: 0.01, max: 2_000, fractionDigits: 4 });
   const amount = faker.number.float({ min: 10, max: 250_000, fractionDigits: 2 });
-  const id = transactionId(account.account_id, security.security_id, tradeDate, acctTypeCode);
+  const transactionId = faker.string.uuid();
+  const id = transactionDocumentId(account.account_id, security.security_id, transactionId);
 
   return withSizedPayload(
     {
       _id: id,
+      transaction_id: transactionId,
       account_id: account.account_id,
       security_id: security.security_id,
+      security_no: security.security_no,
       trade_date: tradeDate,
       trade_date_epoch: Date.parse(`${tradeDate}T00:00:00.000Z`),
       acct_type_code: acctTypeCode,
@@ -111,13 +122,16 @@ export function makeTransactionForSequence(
   const tradeDate = new Date(Date.UTC(2026, 0, 1 - dateOffset)).toISOString().slice(0, 10);
   const quantity = faker.number.float({ min: 0.01, max: 2_000, fractionDigits: 4 });
   const amount = faker.number.float({ min: 10, max: 250_000, fractionDigits: 2 });
-  const id = transactionId(account.account_id, security.security_id, tradeDate, acctTypeCode);
+  const transactionId = `SEED-${account.account_id}-${String(sequence).padStart(12, "0")}`;
+  const id = transactionDocumentId(account.account_id, security.security_id, transactionId);
 
   return withSizedPayload(
     {
       _id: id,
+      transaction_id: transactionId,
       account_id: account.account_id,
       security_id: security.security_id,
+      security_no: security.security_no,
       trade_date: tradeDate,
       trade_date_epoch: Date.parse(`${tradeDate}T00:00:00.000Z`),
       acct_type_code: acctTypeCode,
@@ -131,7 +145,9 @@ export function makeTransactionForSequence(
 
 export function keyForRow(row: AccountRow | SecurityRow | PositionRow | TransactionRow): string {
   if ("household_id" in row) return accountKey(row.account_id);
-  if ("security_id" in row && "security_no" in row) return securityKey(row.security_id);
-  if ("market_value" in row) return `pos:${row.account_id}:${row.security_no}:${row.acct_type_code}`;
-  return `txn:${row.account_id}:${row.security_id}:${row.trade_date}:${row.acct_type_code}`;
+  if ("market_value" in row) return positionKey(row.account_id, row.security_no, row.acct_type_code);
+  if ("transaction_id" in row) {
+    return transactionKey(row.account_id, row.security_no, row.acct_type_code, row.transaction_id);
+  }
+  return securityKey(row.security_id);
 }

@@ -118,30 +118,54 @@ export async function positionsByAccount(ctx: QueryContext, accountId: string): 
   ]);
 }
 
-export async function transactionByComposite(
+export async function transactionById(
   ctx: QueryContext,
   accountId: string,
-  securityId: string,
-  tradeDate: string,
-  acctTypeCode: string
+  securityNo: string,
+  acctTypeCode: string,
+  transactionId: string
 ): Promise<QueryResponse<TransactionRow | null>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
-  const key = transactionKey(accountId, securityId, tradeDate, acctTypeCode);
+  const key = transactionKey(accountId, securityNo, acctTypeCode, transactionId);
   const { value, ms } = await measure(() => jsonGet<TransactionRow>(ctx.client, key));
   timing.redis_ms = ms;
   return response(startedAt, value, timing, value ? 1 : 0, [`JSON.GET ${key} $`]);
 }
 
+export async function transactionsByComposite(
+  ctx: QueryContext,
+  accountId: string,
+  securityId: string,
+  tradeDate: string,
+  acctTypeCode: string
+): Promise<QueryResponse<TransactionRow[]>> {
+  const tradeDateEpoch = Date.parse(`${tradeDate}T00:00:00.000Z`);
+  if (!Number.isFinite(tradeDateEpoch)) {
+    throw new Error("tradeDate must use YYYY-MM-DD format");
+  }
+  return transactionsSearch(ctx, { accountId, securityId, tradeDateEpoch, acctTypeCode, limit: 100 });
+}
+
 export async function transactionsSearch(
   ctx: QueryContext,
-  filters: { accountId?: string; securityId?: string; limit?: number }
+  filters: {
+    accountId?: string;
+    securityId?: string;
+    tradeDateEpoch?: number;
+    acctTypeCode?: string;
+    limit?: number;
+  }
 ): Promise<QueryResponse<TransactionRow[]>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const clauses = [
     filters.accountId ? tagEquals("account_id", filters.accountId) : "",
-    filters.securityId ? tagEquals("security_id", filters.securityId) : ""
+    filters.securityId ? tagEquals("security_id", filters.securityId) : "",
+    filters.tradeDateEpoch !== undefined
+      ? `@trade_date_epoch:[${filters.tradeDateEpoch} ${filters.tradeDateEpoch}]`
+      : "",
+    filters.acctTypeCode ? tagEquals("acct_type_code", filters.acctTypeCode) : ""
   ].filter(Boolean);
   const query = clauses.length ? clauses.join(" ") : "*";
   const limit = filters.limit ?? 100;

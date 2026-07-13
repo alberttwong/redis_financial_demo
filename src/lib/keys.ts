@@ -10,28 +10,36 @@ export function positionId(accountId: string, securityNo: string, acctTypeCode: 
   return `${accountId}|${securityNo}|${acctTypeCode}`;
 }
 
+export function positionSlotTag(accountId: string, securityNo: string, acctTypeCode: string): string {
+  return positionKey(accountId, securityNo, acctTypeCode);
+}
+
 export function positionKey(accountId: string, securityNo: string, acctTypeCode: string): string {
   return `pos:${accountId}:${securityNo}:${acctTypeCode}`;
 }
 
-export function transactionId(
+export function transactionDocumentId(
   accountId: string,
   securityId: string,
-  tradeDate: string,
-  acctTypeCode: string
+  transactionId: string
 ): string {
-  return `${accountId}|${securityId}|${tradeDate}|${acctTypeCode}`;
+  return `${accountId}|${securityId}|${transactionId}`;
 }
 
 export function transactionKey(
   accountId: string,
-  securityId: string,
-  tradeDate: string,
-  acctTypeCode: string
+  securityNo: string,
+  acctTypeCode: string,
+  transactionId: string
 ): string {
-  return `txn:${accountId}:${securityId}:${tradeDate}:${acctTypeCode}`;
+  const slotTag = positionSlotTag(accountId, securityNo, acctTypeCode);
+  return `txn:{${slotTag}}:${encodeKeyPart(transactionId)}`;
 }
 
 export function snapshotKey(accountId: string): string {
   return `acct-snapshot:${accountId}`;
+}
+
+function encodeKeyPart(value: string): string {
+  return encodeURIComponent(value);
 }

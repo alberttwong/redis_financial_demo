@@ -29,6 +29,7 @@ export type SecurityRow = {
 export type PositionRow = {
   _id: string;
   account_id: string;
+  security_id: string;
   security_no: string;
   acct_type_code: string;
   quantity: number;
@@ -39,8 +40,10 @@ export type PositionRow = {
 
 export type TransactionRow = {
   _id: string;
+  transaction_id: string;
   account_id: string;
   security_id: string;
+  security_no: string;
   trade_date: string;
   trade_date_epoch: number;
   acct_type_code: string;

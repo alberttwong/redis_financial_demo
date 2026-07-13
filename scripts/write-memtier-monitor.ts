@@ -1,12 +1,19 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { getSeedConfig } from "../src/lib/config";
 import { INDEXES } from "../src/lib/indexes";
-import { accountKey, snapshotKey, transactionKey, transactionId } from "../src/lib/keys";
+import {
+  accountKey,
+  positionId,
+  positionKey,
+  snapshotKey,
+  transactionDocumentId,
+  transactionKey
+} from "../src/lib/keys";
 import { withSizedPayload } from "../src/lib/payload";
 import { closeRedisClient, getRedisClient } from "../src/lib/redis";
 import { searchKeys } from "../src/lib/search";
 import { tagEquals } from "../src/lib/tag";
-import type { TransactionRow } from "../src/lib/types";
+import type { PositionRow, TransactionRow } from "../src/lib/types";
 
 const TRANSACTION_INDEX = "idx:transactions";
 
@@ -211,14 +218,19 @@ function makeTradeWriteLines(options: {
     const securityIndex = Math.floor(random() * options.securityCount) + 1;
     const accountId = `A${String(accountIndex).padStart(8, "0")}`;
     const securityId = `SEC${String(securityIndex).padStart(8, "0")}`;
+    const securityNo = `SPX${String(securityIndex).padStart(6, "0")}`;
     const tradeDate = new Date(baseTime + index * 1000).toISOString().slice(0, 10);
     const acctTypeCode = ["CASH", "MARGIN", "RETIREMENT", "ADVISORY"][index % 4];
-    const tradeKey = transactionKey(accountId, securityId, `${tradeDate}-${index}`, acctTypeCode);
+    const uniqueTransactionId = `LOAD-${options.seed}-${String(index).padStart(12, "0")}`;
+    const tradeKey = transactionKey(accountId, securityNo, acctTypeCode, uniqueTransactionId);
+    const positionRedisKey = positionKey(accountId, securityNo, acctTypeCode);
     const row: TransactionRow = withSizedPayload(
       {
-        _id: transactionId(accountId, securityId, `${tradeDate}-${index}`, acctTypeCode),
+        _id: transactionDocumentId(accountId, securityId, uniqueTransactionId),
+        transaction_id: uniqueTransactionId,
         account_id: accountId,
         security_id: securityId,
+        security_no: securityNo,
         trade_date: tradeDate,
         trade_date_epoch: Date.parse(`${tradeDate}T00:00:00.000Z`),
         acct_type_code: acctTypeCode,
@@ -229,7 +241,19 @@ function makeTradeWriteLines(options: {
       options.payloadBytes
     );
 
-    return `"JSON.SET" "${tradeKey}" "$" "${escapeMonitorArg(JSON.stringify(row))}"`;
+    const positionTemplate: PositionRow = {
+      _id: positionId(accountId, securityNo, acctTypeCode),
+      account_id: accountId,
+      security_id: securityId,
+      security_no: securityNo,
+      acct_type_code: acctTypeCode,
+      quantity: 0,
+      market_value: 0,
+      as_of_date: tradeDate,
+      payload: ""
+    };
+
+    return `"FCALL" "apply_transaction" "2" "${tradeKey}" "${positionRedisKey}" "${escapeMonitorArg(JSON.stringify(row))}" "${escapeMonitorArg(JSON.stringify(positionTemplate))}"`;
   });
 }
 

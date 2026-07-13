@@ -29,6 +29,7 @@ type QuerySamples = {
   security_no: string;
   acct_type_code: string;
   trade_date: string;
+  transaction_id: string;
 };
 
 const patterns: Pattern[] = [
@@ -37,7 +38,8 @@ const patterns: Pattern[] = [
   { id: "securityByNo", label: "Security by No", group: "Secondary" },
   { id: "positionByComposite", label: "Position composite", group: "Primary" },
   { id: "positionsByAccount", label: "Positions by account", group: "Secondary" },
-  { id: "transactionByComposite", label: "Transaction composite", group: "Primary" },
+  { id: "transactionById", label: "Transaction by ID", group: "Primary" },
+  { id: "transactionsByComposite", label: "Transactions by composite", group: "Secondary" },
   { id: "transactionsByAccount", label: "Transactions by account", group: "Secondary" },
   { id: "transactionsBySecurity", label: "Transactions by security", group: "Secondary" },
   { id: "transactionsByAccountSecurity", label: "Transactions by account + security", group: "Secondary" },
@@ -53,6 +55,7 @@ export default function Home() {
   const [securityNo, setSecurityNo] = useState("SPX000001");
   const [acctTypeCode, setAcctTypeCode] = useState("CASH");
   const [tradeDate, setTradeDate] = useState(new Date().toISOString().slice(0, 10));
+  const [transactionId, setTransactionId] = useState("sample-transaction-id");
   const [limit, setLimit] = useState("100");
   const [result, setResult] = useState<QueryResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,6 +76,7 @@ export default function Home() {
         setSecurityNo(body.samples.security_no);
         setAcctTypeCode(body.samples.acct_type_code);
         setTradeDate(body.samples.trade_date);
+        setTransactionId(body.samples.transaction_id);
       } catch {
         // Keep static fallbacks when Redis has not been seeded yet.
       }
@@ -94,6 +98,7 @@ export default function Home() {
       security_no: securityNo,
       acct_type_code: acctTypeCode,
       trade_date: tradeDate,
+      transaction_id: transactionId,
       limit
     });
 
@@ -153,6 +158,10 @@ export default function Home() {
             <label>
               trade_date
               <input value={tradeDate} onChange={(event) => setTradeDate(event.target.value)} />
+            </label>
+            <label>
+              transaction_id
+              <input value={transactionId} onChange={(event) => setTransactionId(event.target.value)} />
             </label>
             <label>
               limit
