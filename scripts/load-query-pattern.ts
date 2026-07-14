@@ -38,6 +38,8 @@ type Counters = {
   requestErrors: number;
   dropped: number;
   responseBytes: number;
+  redisCommands: number;
+  redisCommandsDuringWindow: number;
   inFlight: number;
   peakInFlight: number;
 };
@@ -84,6 +86,8 @@ async function main() {
     requestErrors: 0,
     dropped: 0,
     responseBytes: 0,
+    redisCommands: 0,
+    redisCommandsDuringWindow: 0,
     inFlight: 0,
     peakInFlight: 0
   };
@@ -106,7 +110,7 @@ async function main() {
       const requestStartedAt = performance.now();
       let finished = false;
 
-      const finish = (statusCode?: number, bytes = 0, requestFailed = false) => {
+      const finish = (statusCode?: number, bytes = 0, redisCommands = 0, requestFailed = false) => {
         if (finished) return;
         finished = true;
         counters.inFlight -= 1;
@@ -115,7 +119,11 @@ async function main() {
         if (requestFailed) counters.requestErrors += 1;
         else if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
           counters.succeeded += 1;
-          if (performance.now() <= measurementEndsAt) counters.succeededDuringWindow += 1;
+          counters.redisCommands += redisCommands;
+          if (performance.now() <= measurementEndsAt) {
+            counters.succeededDuringWindow += 1;
+            counters.redisCommandsDuringWindow += redisCommands;
+          }
         }
         else counters.httpErrors += 1;
         recordLatency(latencyHistogram, performance.now() - requestStartedAt);
@@ -133,15 +141,16 @@ async function main() {
         },
         (response) => {
           let bytes = 0;
+          const redisCommands = positiveHeaderNumber(response.headers["x-redis-command-count"]);
           response.on("data", (chunk: Buffer) => {
             bytes += chunk.length;
           });
-          response.on("end", () => finish(response.statusCode, bytes));
-          response.on("error", () => finish(response.statusCode, bytes, true));
+          response.on("end", () => finish(response.statusCode, bytes, redisCommands));
+          response.on("error", () => finish(response.statusCode, bytes, redisCommands, true));
         }
       );
       request.setTimeout(requestTimeoutMs, () => request.destroy(new Error("request timeout")));
-      request.on("error", () => finish(undefined, 0, true));
+      request.on("error", () => finish(undefined, 0, 0, true));
       request.end();
     };
 
@@ -182,10 +191,14 @@ async function main() {
   }
 
   const finishedAt = performance.now();
+  const redisCommandsPerSuccessfulRequest =
+    counters.succeeded === 0 ? 0 : counters.redisCommands / counters.succeeded;
   const result = {
     pattern,
     target_rps: targetRps,
     achieved_rps: round(counters.succeededDuringWindow / testTimeSeconds),
+    achieved_redis_ops_per_second: round(counters.redisCommandsDuringWindow / testTimeSeconds),
+    estimated_target_redis_ops_per_second: round(targetRps * redisCommandsPerSuccessfulRequest),
     offered_rps: round(counters.started / testTimeSeconds),
     test_time_seconds: testTimeSeconds,
     wall_time_seconds: round((finishedAt - startedAt) / 1000),
@@ -199,6 +212,8 @@ async function main() {
     request_errors: counters.requestErrors,
     error_rate: counters.completed === 0 ? 0 : round((counters.httpErrors + counters.requestErrors) / counters.completed),
     response_bytes: counters.responseBytes,
+    redis_commands: counters.redisCommands,
+    redis_commands_per_successful_request: round(redisCommandsPerSuccessfulRequest),
     response_megabytes_per_second: round(counters.responseBytes / 1024 / 1024 / testTimeSeconds),
     peak_in_flight: counters.peakInFlight,
     latency_ms: {
@@ -275,6 +290,11 @@ function readPositiveNumber(name: string, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function positiveHeaderNumber(value: string | string[] | undefined): number {
+  const parsed = Number(Array.isArray(value) ? value[0] : value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 async function waitForScheduledStart(): Promise<void> {

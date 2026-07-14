@@ -18,6 +18,7 @@
     "seed:positions": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts positions",
     "seed:transactions": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts transactions",
     "seed:snapshots": "node --env-file-if-exists=.env.local --import tsx scripts/seed.ts snapshots",
+    "seed:dev": "bash scripts/seed-dev.sh",
     "seed:initial-load": "bash scripts/seed-initial-load.sh",
     "smoke": "node --env-file-if-exists=.env.local --import tsx scripts/smoke.ts",
     "smoke:transactions": "node --env-file-if-exists=.env.local --import tsx scripts/smoke-transaction-write.ts",
@@ -34,7 +35,9 @@
     "bench:query:account-portfolio-join": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountPortfolioJoin",
     "bench:query:account-activity-join": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountActivityJoin",
     "bench:query:account-snapshot": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountSnapshot",
+    "bench:local": "bash scripts/bench-local.sh",
     "bench:concurrent": "bash scripts/bench-concurrent.sh",
+    "bench:web": "bash scripts/aws-load-runner-start-web.sh",
     "bench:aws-web": "bash scripts/aws-load-runner-start-web.sh",
     "bench:aws-runner": "bash scripts/aws-load-runner-run.sh"
   },

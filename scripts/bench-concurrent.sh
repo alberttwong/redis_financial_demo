@@ -69,24 +69,33 @@ fi
 perl -0pi -e 's/"authenticate": "[^"]+"/"authenticate": "[redacted]"/g' memtier-output/trade-writes.json
 
 if command -v jq >/dev/null 2>&1; then
-  target_rate=0
-  achieved_rate=0
+  client_target_rate=0
+  client_achieved_rate=0
+  redis_target_rate=0
+  redis_achieved_rate=0
 
   echo "Concurrent benchmark complete:"
   for benchmark in "${query_benchmarks[@]}"; do
     result="memtier-output/query-${benchmark}.json"
     benchmark_target="$(jq -r '.target_rps' "$result")"
     benchmark_achieved="$(jq -r '.achieved_rps' "$result")"
-    target_rate="$(awk "BEGIN { printf \"%.2f\", ${target_rate} + ${benchmark_target} }")"
-    achieved_rate="$(awk "BEGIN { printf \"%.2f\", ${achieved_rate} + ${benchmark_achieved} }")"
-    echo "  ${benchmark}: ${benchmark_achieved} reads/sec (target ${benchmark_target})"
+    benchmark_redis_target="$(jq -r '.estimated_target_redis_ops_per_second // 0' "$result")"
+    benchmark_redis_achieved="$(jq -r '.achieved_redis_ops_per_second // 0' "$result")"
+    client_target_rate="$(awk "BEGIN { printf \"%.2f\", ${client_target_rate} + ${benchmark_target} }")"
+    client_achieved_rate="$(awk "BEGIN { printf \"%.2f\", ${client_achieved_rate} + ${benchmark_achieved} }")"
+    redis_target_rate="$(awk "BEGIN { printf \"%.2f\", ${redis_target_rate} + ${benchmark_redis_target} }")"
+    redis_achieved_rate="$(awk "BEGIN { printf \"%.2f\", ${redis_achieved_rate} + ${benchmark_redis_achieved} }")"
+    echo "  ${benchmark}: ${benchmark_achieved} HTTP requests/sec; ${benchmark_redis_achieved} Redis ops/sec"
   done
 
   trade_achieved="$(jq -r '."ALL STATS".Totals."Ops/sec"' memtier-output/trade-writes.json)"
-  target_rate="$(awk "BEGIN { printf \"%.2f\", ${target_rate} + ${trade_target_rps} }")"
-  achieved_rate="$(awk "BEGIN { printf \"%.2f\", ${achieved_rate} + ${trade_achieved} }")"
+  client_target_rate="$(awk "BEGIN { printf \"%.2f\", ${client_target_rate} + ${trade_target_rps} }")"
+  client_achieved_rate="$(awk "BEGIN { printf \"%.2f\", ${client_achieved_rate} + ${trade_achieved} }")"
+  redis_target_rate="$(awk "BEGIN { printf \"%.2f\", ${redis_target_rate} + ${trade_target_rps} }")"
+  redis_achieved_rate="$(awk "BEGIN { printf \"%.2f\", ${redis_achieved_rate} + ${trade_achieved} }")"
   echo "  trade-writes: ${trade_achieved} writes/sec (target ${trade_target_rps})"
-  echo "  combined: ${achieved_rate} operations/sec (target ${target_rate})"
+  echo "  combined client operations: ${client_achieved_rate}/sec (target ${client_target_rate})"
+  echo "  estimated Redis operations: ${redis_achieved_rate}/sec (target ${redis_target_rate})"
 fi
 
 echo "Logs:"

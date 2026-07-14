@@ -19,6 +19,7 @@ type QueryResult = {
   };
   result_count?: number;
   payload_bytes?: number;
+  redis_command_count?: number;
   commands?: string[];
   error?: string;
 };
@@ -191,6 +192,7 @@ export default function Home() {
               <Metric label="Search" value={`${result.timing.search_ms} ms`} />
               <Metric label="Hydrate" value={`${result.timing.hydrate_ms} ms`} />
               <Metric label="Join" value={`${result.timing.join_ms} ms`} />
+              <Metric label="Redis Ops" value={String(result.redis_command_count ?? 0)} />
               <Metric label="Rows" value={String(result.result_count ?? 0)} />
               <Metric label="Bytes" value={formatBytes(result.payload_bytes ?? 0)} />
             </div>

@@ -54,6 +54,10 @@ export type TransactionRow = {
   payload: string;
 };
 
+export type SecurityProjection = Omit<SecurityRow, "payload">;
+export type PositionProjection = Omit<PositionRow, "payload">;
+export type TransactionProjection = Omit<TransactionRow, "payload">;
+
 export type AccountSnapshot = {
   _id: string;
   account_id: string;
@@ -62,8 +66,8 @@ export type AccountSnapshot = {
   position_count: number;
   transaction_count: number;
   total_market_value: number;
-  recent_transactions: Array<Omit<TransactionRow, "payload">>;
-  positions: Array<Omit<PositionRow, "payload"> & { security?: Omit<SecurityRow, "payload"> }>;
+  recent_transactions: TransactionProjection[];
+  positions: Array<PositionProjection & { security?: SecurityProjection }>;
 };
 
 export type Timings = {
@@ -79,6 +83,7 @@ export type QueryResponse<T> = {
   timing: Timings;
   result_count: number;
   payload_bytes: number;
+  redis_command_count: number;
   commands: string[];
 };
 
