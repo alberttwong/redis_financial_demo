@@ -1,17 +1,16 @@
 import type { RedisClientType } from "redis";
-import { jsonGet, jsonMGet, jsonSet } from "./json";
+import { jsonGet, jsonMGetFields, jsonSet } from "./json";
 import { accountKey, securityKey, snapshotKey } from "./keys";
+import { SECURITY_PROJECTION_FIELDS } from "./projections";
 import { positionsByAccount, transactionsSearch } from "./queries";
 import type {
   AccountRow,
   AccountSnapshot,
-  PositionRow,
+  PositionProjection,
+  SecurityProjection,
   SecurityRow,
   TransactionRow
 } from "./types";
-
-type PositionProjection = Omit<PositionRow, "payload">;
-type SecurityProjection = Omit<SecurityRow, "payload">;
 
 export type SnapshotRefreshResult = {
   status: "updated" | "rebuilt";
@@ -140,9 +139,9 @@ export async function rebuildAccountSnapshot(
     position_count: positions.result_count,
     transaction_count: transactions.result_count,
     total_market_value: positions.data.reduce((sum, position) => sum + position.market_value, 0),
-    recent_transactions: transactions.data.slice(0, 200).map(stripPayload),
+    recent_transactions: transactions.data.slice(0, 200),
     positions: positions.data.map((position) => ({
-      ...stripPayload(position),
+      ...position,
       security: securityByNo.get(position.security_no)
     }))
   };
@@ -153,7 +152,7 @@ export async function rebuildAccountSnapshot(
 
 async function loadSecurityLookup(
   client: RedisClientType,
-  positions: PositionRow[],
+  positions: PositionProjection[],
   provided?: ReadonlyMap<string, SecurityProjection>
 ): Promise<Map<string, SecurityProjection>> {
   const lookup = new Map(provided ?? []);
@@ -165,9 +164,13 @@ async function loadSecurityLookup(
   }
 
   const securityIds = [...missingById.keys()];
-  const securities = await jsonMGet<SecurityRow>(client, securityIds.map(securityKey));
+  const securities = await jsonMGetFields<SecurityProjection>(
+    client,
+    securityIds.map(securityKey),
+    SECURITY_PROJECTION_FIELDS
+  );
   for (const security of securities) {
-    if (security) lookup.set(security.security_no, stripPayload(security));
+    if (security) lookup.set(security.security_no, security);
   }
   return lookup;
 }

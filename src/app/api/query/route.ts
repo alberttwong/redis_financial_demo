@@ -24,7 +24,12 @@ export async function GET(request: NextRequest) {
   try {
     const client = await getRedisClient();
     const result = await runPattern(pattern, params, startedAt, client);
-    return NextResponse.json(result);
+    return NextResponse.json(result, {
+      headers: {
+        "x-query-payload-bytes": String(result.payload_bytes),
+        "x-redis-command-count": String(result.redis_command_count)
+      }
+    });
   } catch (error) {
     return NextResponse.json(
       {

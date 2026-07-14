@@ -193,6 +193,7 @@ Every API response should include timing metadata:
   },
   "result_count": 0,
   "payload_bytes": 0,
+  "redis_command_count": 0,
   "commands": []
 }
 ```
@@ -218,10 +219,11 @@ Redis Query Engine is not a relational SQL join planner. Runtime joins should ha
 Runtime join flow:
 
 1. Use `JSON.GET` when the primary key is known.
-2. Use `FT.SEARCH` to discover matching keys when a secondary lookup is required.
-3. Use pipelined `JSON.GET` calls to hydrate related rows.
-4. Assemble the joined response in the API layer.
-5. Return timing metadata for search, hydration, join assembly, and total request time.
+2. Use `FT.SEARCH RETURN` to retrieve matching collection rows with only the required JSON fields when a secondary lookup is required.
+3. Start independent account and collection reads concurrently.
+4. Use pipelined multi-path `JSON.GET` calls only for related security rows; do not transfer synthetic payloads for collection or join reads.
+5. Assemble the joined response in the API layer.
+6. Return timing metadata for search, hydration, join assembly, and total request time.
 
 Join examples:
 
@@ -250,25 +252,27 @@ The UI should compare runtime join timing against materialized snapshot timing s
 
 ## Query And Trade-Write Load Profiles
 
-The 12 query-pattern profiles call `/api/query` so each load test follows the same direct lookup, secondary search, hydration, join, and response path as the browser workbench. The default concurrent targets are:
+The 12 query-pattern profiles call `/api/query` so each load test follows the same direct lookup, projected secondary search, optional related-security hydration, join, and response path as the browser workbench. The default concurrent targets are:
 
 - `accountPortfolioJoin`: 50,000 reads/sec
 - `accountActivityJoin`: 50,000 reads/sec
 - Ten other query patterns: 10,000 reads/sec each
 - Atomic transaction writes: 30,000 writes/sec
 
-The combined target is 230,000 operations/sec. Query runners use persistent HTTP connections and valid seeded identifiers from `/api/samples`. The transaction writer uses `memtier_benchmark` with `FCALL apply_transaction`, unique transaction keys, tunable threads, clients, pipeline depth, and a total target rate that is divided across connections.
+The combined target is 230,000 client operations/sec. It is not a Redis command-rate target: collection searches use one projected `FT.SEARCH`, while joins still issue additional account and related-security reads. Query runners use persistent HTTP connections and valid seeded identifiers from `/api/samples`, and record both HTTP request rate and estimated Redis command rate. The transaction writer uses `memtier_benchmark` with `FCALL apply_transaction`, unique transaction keys, tunable threads, clients, pipeline depth, and a total target rate that is divided across connections.
 
 `transactionsByComposite` remains a workbench query but is outside this 12-query concurrent load profile.
 
 Large-document query results should report both:
 
 - Requests per second
+- Estimated Redis commands per second
 - Response throughput in MB/sec
 
 Benchmark output should capture:
 
-- Target and achieved ops/sec
+- Target and achieved client ops/sec
+- Estimated target and achieved Redis ops/sec
 - p50 latency
 - p99 latency
 - p99.9 latency

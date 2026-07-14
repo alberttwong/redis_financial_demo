@@ -3,6 +3,7 @@ export type RedisConfig = {
   username?: string;
   password?: string;
   tls: boolean;
+  poolSize: number;
 };
 
 export type SeedConfig = {
@@ -44,7 +45,8 @@ export function getRedisConfig(): RedisConfig {
     url,
     username: process.env.REDIS_USERNAME,
     password: process.env.REDIS_PASSWORD,
-    tls: process.env.REDIS_TLS === "true" || url.startsWith("rediss://")
+    tls: process.env.REDIS_TLS === "true" || url.startsWith("rediss://"),
+    poolSize: readInt("REDIS_POOL_SIZE", 4)
   };
 }
 
@@ -53,8 +55,8 @@ export function getSeedConfig(): SeedConfig {
   return {
     accountCount,
     securityCount: readInt("SEED_SECURITIES", 500),
-    positionsPerAccount: readInt("SEED_POSITIONS_PER_ACCOUNT", 300),
-    transactionCount: readInt("SEED_TRANSACTIONS", readInt("SEED_TRANSACTIONS_PER_ACCOUNT", 60) * accountCount),
+    positionsPerAccount: readInt("SEED_POSITIONS_PER_ACCOUNT", 60),
+    transactionCount: readInt("SEED_TRANSACTIONS", readInt("SEED_TRANSACTIONS_PER_ACCOUNT", 300) * accountCount),
     securityBytes: readInt("SEED_SECURITY_BYTES", 8_192),
     positionBytes: readInt("SEED_POSITION_BYTES", 8_192),
     transactionBytes: readInt("SEED_TRANSACTION_BYTES", 8_192),

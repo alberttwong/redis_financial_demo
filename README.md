@@ -219,14 +219,14 @@ flowchart TD
     API["Next.js API route"]
     KEY{"Known primary or composite key?"}
     GET["JSON.GET full row"]
-    SEARCH["FT.SEARCH secondary index"]
-    HYDRATE["Pipeline JSON.GET matched keys"]
-    JOIN["Assemble join response in API"]
+    SEARCH["FT.SEARCH returns projected JSON fields"]
+    RELATED["Optional pipelined security JSON.GET"]
+    JOIN["Assemble optional join response in API"]
     TIMER["Attach timing: search, hydrate, join, total"]
 
     UI --> API --> KEY
     KEY -- yes --> GET --> TIMER --> UI
-    KEY -- no --> SEARCH --> HYDRATE --> JOIN --> TIMER --> UI
+    KEY -- no --> SEARCH --> RELATED --> JOIN --> TIMER --> UI
 ```
 
 ### Typical Stock Trading Change Flow
@@ -252,20 +252,26 @@ flowchart LR
 
 ## Load Testing
 
-The concurrent load profile targets **230,000 operations per second** across 12 query reads and atomic transaction writes:
+The full concurrent profile targets **230,000 client operations per second** across 12 HTTP query workloads and atomic transaction writes:
 
 - `accountPortfolioJoin` and `accountActivityJoin`: **50,000 reads/sec each**
 - The other 10 query patterns: **10,000 reads/sec each**
 - Trade writes: **30,000 writes/sec**
 
-The query tests call `/api/query`, so searches, hydration, API-layer joins, and response serialization follow the same path as the web UI. Start the app before running a standalone query test:
+The query tests call `/api/query`, so projected searches, related-security hydration, API-layer joins, and response serialization follow the same path as the web UI. Collection queries return compact fields directly from `FT.SEARCH`; joins use pipelined projected `JSON.GET` calls only for related securities. Primary-key point reads still return the complete row. Start the production-mode benchmark server before running a standalone query test:
 
 ```sh
-npm run bench:aws-web
+npm run bench:web
 npm run bench:query:account-by-id
 ```
 
-Run the complete workload with:
+Run a laptop-safe combined smoke profile with:
+
+```sh
+npm run bench:local
+```
+
+Run the full target profile only from a suitably sized runner near Redis Cloud:
 
 ```sh
 npm run bench:concurrent
@@ -288,7 +294,7 @@ npm run bench:concurrent
 
 The newer `transactionsByComposite` UI pattern remains available in the workbench but is not part of this 12-query concurrent profile.
 
-Each query runner obtains valid seeded identifiers from `/api/samples`, uses persistent HTTP connections, and writes target rate, achieved rate, latency percentiles, errors, and response throughput to `memtier-output/query-<pattern>.json`. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
+Each query runner obtains valid seeded identifiers from `/api/samples`, uses persistent HTTP connections, and writes HTTP request rate, estimated Redis command rate, latency percentiles, errors, and response throughput to `memtier-output/query-<pattern>.json`. `x-redis-command-count` reports how many Redis commands each successful HTTP request issued. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
 
 Useful tuning knobs:
 
@@ -300,7 +306,7 @@ QUERY_TEST_TIME=60
 QUERY_MAX_IN_FLIGHT=2000
 ```
 
-The 230,000 ops/sec concurrent target is higher than the current Terraform throughput default of 180,000 ops/sec, so an unchanged Redis Cloud deployment may throttle or miss the requested rates. The result files preserve achieved throughput rather than treating the configured target as success.
+The 230,000 client-op target is not equivalent to 230,000 Redis operations: collection searches now use one projected `FT.SEARCH`, but joins still issue one direct account read plus one search and one projected `JSON.GET` per distinct security. The benchmark summary reports both rates. Compare the estimated Redis operation target with the current Terraform throughput default of 180,000 operations/sec; an unchanged deployment may throttle or miss the requested rates.
 
 ### AWS us-west-2 Runner
 
@@ -324,6 +330,12 @@ AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 The helper copies the current repo and `.env.local` to the EC2 host, starts the Next.js query workbench on port `3000`, and runs all 12 query tests plus trade writes through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
 
 ## Initial Load Profile
+
+The development profile uses 100 accounts, 500 securities, 6,000 positions, 30,000 transactions, and 100 snapshots. Its pipelined loader uses a higher laptop-safe batch/concurrency setting:
+
+```sh
+npm run seed:dev
+```
 
 The initial load profile generates **5,000 accounts**. The seeder writes base JSON rows first, creates or verifies Redis Query Engine indexes after the base load, then builds account snapshots with bounded concurrency.
 
@@ -363,7 +375,7 @@ SEED_DROP_INDEXES_BEFORE_LOAD=true
 SEED_SKIP_SNAPSHOTS=false
 ```
 
-Bulk writes use Redis pipelines per batch and keep up to `SEED_WRITE_CONCURRENCY` batches in flight. Higher `SEED_BATCH_SIZE` and `SEED_WRITE_CONCURRENCY` can improve throughput but also raise local memory, socket-buffer, and Redis write pressure. `SEED_DROP_INDEXES_BEFORE_LOAD=true` drops Redis Query Engine indexes before the base row load and recreates them afterward, avoiding per-row index maintenance during bulk load. Higher `SEED_SNAPSHOT_CONCURRENCY` reduces snapshot wall-clock time until Redis Cloud or network latency becomes the bottleneck.
+Bulk writes use Redis pipelines per batch and keep up to `SEED_WRITE_CONCURRENCY` batches in flight. Higher `SEED_BATCH_SIZE` and `SEED_WRITE_CONCURRENCY` can improve throughput but also raise local memory, socket-buffer, and Redis write pressure. `SEED_DROP_INDEXES_BEFORE_LOAD=true` drops Redis Query Engine indexes before the base row load and recreates them afterward, avoiding per-row index maintenance during bulk load. Snapshot rebuilds use compact RedisJSON projections instead of downloading synthetic position, transaction, and security payloads. Higher `SEED_SNAPSHOT_CONCURRENCY` reduces snapshot wall-clock time until Redis Cloud or network latency becomes the bottleneck.
 
 The fastest full load is from a machine close to Redis Cloud, for example a temporary runner or VM in AWS `us-west-2`; larger security, position, transaction, and snapshot rows can make laptop-to-cloud latency visible. Deferring index creation helps most on a fresh database. If indexes already exist, Redis still maintains them during base writes.
 
@@ -422,10 +434,10 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Initial load generates 5,000 accounts and 3,000 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
 - With the default initial-load profile, 5,000 accounts produces 1,500,000 positions, 10,000,000 random transactions across the account population, and 5,000 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
 - In a typical stock trading scenario, `transactions` are the incoming change/history records and `positions` are derived current or as-of holdings.
-- Runtime joins happen in the API layer by using Redis Query Engine to discover keys, then pipelined `JSON.GET` commands to hydrate related JSON rows across Redis Cluster slots.
+- Runtime joins happen in the API layer. Redis Query Engine returns collection projection fields directly in one `FT.SEARCH`; pipelined projected `JSON.GET` commands hydrate related securities across Redis Cluster slots. The account read and collection search start concurrently, and security joins use direct `security_id` keys rather than per-row secondary searches.
 - Redis is not used as a relational SQL join planner.
 - Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
-- The concurrent load-test target is 230,000 operations per second: two joins at 50,000 reads/sec each, ten other queries at 10,000 reads/sec each, and 30,000 atomic trade writes/sec.
+- The full concurrent load-test target is 230,000 client operations per second: two joins at 50,000 HTTP requests/sec each, ten other queries at 10,000 HTTP requests/sec each, and 30,000 atomic trade writes/sec. Reported Redis command rates are higher for multi-command query patterns.
 - Runtime writes and the trade-write load test call the atomic `apply_transaction` Redis Function; raw `JSON.SET` is reserved for historical batch loading.
 - The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 180,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.
