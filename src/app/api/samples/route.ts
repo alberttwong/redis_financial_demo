@@ -1,23 +1,15 @@
-import { NextResponse } from "next/server";
-import { INDEXES } from "@/lib/indexes";
-import { jsonGet } from "@/lib/json";
+import { NextResponse, type NextRequest } from "next/server";
+import {
+  firstQuerySample,
+  loadBenchmarkSamplePool,
+  type BenchmarkSamplePool,
+  type QuerySample
+} from "@/lib/benchmark-samples";
 import { getRedisClient } from "@/lib/redis";
-import { searchKeys } from "@/lib/search";
-import { tagEquals } from "@/lib/tag";
-import type { AccountRow, PositionRow, SecurityRow, TransactionRow } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-type QuerySamples = {
-  account_id: string;
-  security_id: string;
-  security_no: string;
-  acct_type_code: string;
-  trade_date: string;
-  transaction_id: string;
-};
-
-const FALLBACK_SAMPLES: QuerySamples = {
+const FALLBACK_SAMPLES: QuerySample = {
   account_id: "A00000001",
   security_id: "SEC00000001",
   security_no: "SPX000001",
@@ -26,32 +18,41 @@ const FALLBACK_SAMPLES: QuerySamples = {
   transaction_id: "sample-transaction-id"
 };
 
-export async function GET() {
+const FALLBACK_POOL: BenchmarkSamplePool = {
+  accounts: [FALLBACK_SAMPLES.account_id],
+  securities: [
+    {
+      security_id: FALLBACK_SAMPLES.security_id,
+      security_no: FALLBACK_SAMPLES.security_no
+    }
+  ],
+  positions: [
+    {
+      account_id: FALLBACK_SAMPLES.account_id,
+      security_id: FALLBACK_SAMPLES.security_id,
+      security_no: FALLBACK_SAMPLES.security_no,
+      acct_type_code: FALLBACK_SAMPLES.acct_type_code
+    }
+  ],
+  transactions: [FALLBACK_SAMPLES]
+};
+
+export async function GET(request: NextRequest) {
+  const count = requestedCount(request.nextUrl.searchParams.get("count"));
   try {
     const client = await getRedisClient();
-    const transaction = await firstJsonFromIndex<TransactionRow>(INDEXES.transactions, "*");
-    const position = transaction ? await positionForTransaction(transaction) : await firstJsonFromIndex<PositionRow>(INDEXES.positions, "*");
-    const accountId = transaction?.account_id ?? position?.account_id ?? FALLBACK_SAMPLES.account_id;
-    const securityId = transaction?.security_id ?? (await firstJsonFromIndex<SecurityRow>(INDEXES.securities, "*"))?.security_id ?? FALLBACK_SAMPLES.security_id;
-    const securityNo = transaction?.security_no ?? position?.security_no ?? (await firstJsonFromIndex<SecurityRow>(INDEXES.securities, "*"))?.security_no ?? FALLBACK_SAMPLES.security_no;
-    const acctTypeCode = position?.acct_type_code ?? transaction?.acct_type_code ?? FALLBACK_SAMPLES.acct_type_code;
-    const tradeDate = transaction?.trade_date ?? FALLBACK_SAMPLES.trade_date;
-    const transactionId = transaction?.transaction_id ?? FALLBACK_SAMPLES.transaction_id;
-
-    const samples: QuerySamples = {
-      account_id: accountId,
-      security_id: securityId,
-      security_no: securityNo,
-      acct_type_code: acctTypeCode,
-      trade_date: tradeDate,
-      transaction_id: transactionId
-    };
-
-    return NextResponse.json({ samples });
+    const samplePool = await loadBenchmarkSamplePool(client, count);
+    return NextResponse.json({
+      samples: firstQuerySample(samplePool),
+      sample_pool: samplePool,
+      sample_pool_size: samplePoolSizes(samplePool)
+    });
   } catch (error) {
     return NextResponse.json(
       {
         samples: FALLBACK_SAMPLES,
+        sample_pool: FALLBACK_POOL,
+        sample_pool_size: samplePoolSizes(FALLBACK_POOL),
         error: error instanceof Error ? error.message : "Unable to load query samples"
       },
       { status: 200 }
@@ -59,23 +60,12 @@ export async function GET() {
   }
 }
 
-async function firstJsonFromIndex<T>(index: string, query: string): Promise<T | null> {
-  const client = await getRedisClient();
-  const result = await searchKeys(client, index, query, { limit: 1 });
-  const key = result.keys[0];
-  if (!key) return null;
-  return jsonGet<T>(client, key);
+function requestedCount(value: string | null): number {
+  if (!value) return 1;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(5_000, parsed)) : 1;
 }
 
-async function positionForTransaction(transaction: TransactionRow): Promise<PositionRow | null> {
-  const clauses = [
-    tagEquals("account_id", transaction.account_id),
-    transaction.security_no ? tagEquals("security_no", transaction.security_no) : "",
-    tagEquals("acct_type_code", transaction.acct_type_code)
-  ].filter(Boolean);
-  const position = await firstJsonFromIndex<PositionRow>(
-    INDEXES.positions,
-    clauses.join(" ")
-  );
-  return position ?? firstJsonFromIndex<PositionRow>(INDEXES.positions, tagEquals("account_id", transaction.account_id));
+function samplePoolSizes(pool: BenchmarkSamplePool) {
+  return Object.fromEntries(Object.entries(pool).map(([name, values]) => [name, values.length]));
 }

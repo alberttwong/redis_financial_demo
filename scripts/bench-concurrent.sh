@@ -61,11 +61,6 @@ for index in "${!benchmarks[@]}"; do
 done
 set -e
 
-if [[ "$failed" -ne 0 ]]; then
-  echo "Concurrent benchmark failed." >&2
-  exit 1
-fi
-
 perl -0pi -e 's/"authenticate": "[^"]+"/"authenticate": "[redacted]"/g' memtier-output/trade-writes.json
 
 if command -v jq >/dev/null 2>&1; then
@@ -88,7 +83,7 @@ if command -v jq >/dev/null 2>&1; then
     echo "  ${benchmark}: ${benchmark_achieved} HTTP requests/sec; ${benchmark_redis_achieved} Redis ops/sec"
   done
 
-  trade_achieved="$(jq -r '."ALL STATS".Totals."Ops/sec"' memtier-output/trade-writes.json)"
+  trade_achieved="$(jq -r '.achieved_ops_per_second // ."ALL STATS".Totals."Ops/sec"' memtier-output/trade-writes.json)"
   client_target_rate="$(awk "BEGIN { printf \"%.2f\", ${client_target_rate} + ${trade_target_rps} }")"
   client_achieved_rate="$(awk "BEGIN { printf \"%.2f\", ${client_achieved_rate} + ${trade_achieved} }")"
   redis_target_rate="$(awk "BEGIN { printf \"%.2f\", ${redis_target_rate} + ${trade_target_rps} }")"
@@ -103,3 +98,8 @@ for benchmark in "${query_benchmarks[@]}"; do
   echo "  memtier-output/concurrent-query-${benchmark}.log"
 done
 echo "  ${trade_log}"
+
+if [[ "$failed" -ne 0 ]]; then
+  echo "Concurrent benchmark failed." >&2
+  exit 1
+fi

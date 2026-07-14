@@ -1,8 +1,13 @@
-# AWS Load Runner
+# AWS Benchmark Hosts
 
-This Terraform stack provisions a temporary EC2 benchmark host in AWS `us-west-2` so the query API, HTTP load generators, and `memtier_benchmark` trade writer run close to the Redis Cloud database.
+This Terraform stack provisions two temporary EC2 hosts in AWS `us-west-2`:
 
-The stack does not receive or store `REDIS_URL`. Use `scripts/aws-load-runner-run.sh` after provisioning; it copies your local `.env.local` to the host over SSH at run time.
+- A dedicated Next.js query API host.
+- A dedicated load-generator host for the 12 HTTP query runners and distributed atomic trade writer.
+
+The generator reaches the API on its private VPC address. Keeping load generation off the API host prevents scheduler, CPU, memory, and network contention from distorting the application result.
+
+The stack does not receive or store `REDIS_URL`. `scripts/aws-load-runner-run.sh` copies the ignored local `.env.local` to both hosts over SSH at run time and sets mode `0600`.
 
 ## Provision
 
@@ -17,7 +22,9 @@ terraform apply \
   -var='web_ingress_cidr_blocks=["<your-public-ip>/32"]'
 ```
 
-The default instance type is `c7i.4xlarge` so one runner can keep the query API and load generators active for the 230,000 ops/sec target profile. Actual achieved throughput depends on response size, query latency, and Redis Cloud capacity.
+Both roles default to `c7i.4xlarge`. Override `instance_type` for the API host or `generator_instance_type` for the load-generator host. Actual achieved throughput depends on response size, query latency, Redis Cloud capacity, and the number of application and generator hosts.
+
+The stack applies `owner=albert_wong` by default because the target AWS account automatically terminates EC2 instances that do not carry an `owner` tag. Override `tags.owner` when deploying for a different account owner.
 
 ## Run The Benchmark
 
@@ -35,21 +42,24 @@ AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem \
 QUERY_DEFAULT_TARGET_RPS=10000 \
 QUERY_JOIN_TARGET_RPS=50000 \
 QUERY_TEST_TIME=60 \
+QUERY_SAMPLE_POOL_SIZE=1000 \
+QUERY_RANDOM_SEED=20260714 \
 MEMTIER_TRADE_TARGET_RPS=30000 \
+TRADE_SAMPLE_POOL_SIZE=1000 \
+TRADE_RANDOM_SEED=20260714 \
   npm run bench:aws-runner
 ```
 
-The helper runs:
+The helper:
 
-1. `npm ci`
-2. `npm run bench:aws-web`
-3. `npm run bench:concurrent`
+1. Syncs the repository and `.env.local` to both hosts.
+2. Installs dependencies and starts the production Next.js API on the API host.
+3. Runs `bench:concurrent` on the generator host against the API private IP.
+4. Downloads generator artifacts and the API web log even when a target run reports errors.
 
-`bench:aws-web` builds and starts the Next.js query workbench on port `3000`. `bench:concurrent` runs the 12 query-pattern load tests against that API and runs atomic trade writes during the same window. Defaults target two joins at `50,000` reads/sec each, ten other queries at `10,000` reads/sec each, and `30,000` new transaction writes/sec.
+Query requests select new valid keys from Redis-backed sample pools. Trade writes select many existing positions while keeping each transaction and position in the same Redis hash slot.
 
-It copies `memtier-output/` back to the local repo when finished and redacts the memtier JSON auth field on the remote host before download.
-
-Terraform outputs `web_url`; it is reachable only from CIDRs passed through `web_ingress_cidr_blocks`.
+Terraform outputs `web_url` for the optional public workbench and `generator_query_url` for the private generator-to-API route.
 
 ## Destroy
 
