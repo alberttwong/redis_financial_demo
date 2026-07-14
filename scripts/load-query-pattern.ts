@@ -2,8 +2,15 @@ import { mkdir, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import { performance } from "node:perf_hooks";
+import {
+  createSeededRandom,
+  selectQuerySample,
+  type BenchmarkSamplePool,
+  type QueryPattern,
+  type QuerySample
+} from "../src/lib/benchmark-samples";
 
-const QUERY_PATTERNS = {
+const QUERY_PROFILES = {
   accountById: { slug: "account-by-id", target: "default" },
   securityById: { slug: "security-by-id", target: "default" },
   securityByNo: { slug: "security-by-no", target: "default" },
@@ -16,18 +23,9 @@ const QUERY_PATTERNS = {
   accountPortfolioJoin: { slug: "account-portfolio-join", target: "join" },
   accountActivityJoin: { slug: "account-activity-join", target: "join" },
   accountSnapshot: { slug: "account-snapshot", target: "default" }
-} as const;
+} as const satisfies Partial<Record<QueryPattern, { slug: string; target: "default" | "join" }>>;
 
-type QueryPattern = keyof typeof QUERY_PATTERNS;
-
-type QuerySamples = {
-  account_id: string;
-  security_id: string;
-  security_no: string;
-  acct_type_code: string;
-  trade_date: string;
-  transaction_id: string;
-};
+type LoadQueryPattern = keyof typeof QUERY_PROFILES;
 
 type Counters = {
   started: number;
@@ -46,11 +44,11 @@ type Counters = {
 
 async function main() {
   const pattern = process.argv[2];
-  if (!isQueryPattern(pattern)) {
-    throw new Error(`Query pattern must be one of: ${Object.keys(QUERY_PATTERNS).join(", ")}`);
+  if (!isLoadQueryPattern(pattern)) {
+    throw new Error(`Query pattern must be one of: ${Object.keys(QUERY_PROFILES).join(", ")}`);
   }
 
-  const profile = QUERY_PATTERNS[pattern];
+  const profile = QUERY_PROFILES[pattern];
   const baseUrl = new URL(
     process.env.QUERY_BASE_URL ?? `http://127.0.0.1:${process.env.AWS_LOAD_RUNNER_WEB_PORT ?? "3000"}`
   );
@@ -67,11 +65,13 @@ async function main() {
   const drainTimeoutMs = readPositiveNumber("QUERY_DRAIN_TIMEOUT_MS", 30_000);
   const maxInFlight = readPositiveNumber("QUERY_MAX_IN_FLIGHT", 2_000);
 
-  const samples = await loadSamples(baseUrl);
-  const queryUrl = makeQueryUrl(baseUrl, pattern, samples);
+  const samplePoolSize = readPositiveNumber("QUERY_SAMPLE_POOL_SIZE", 1_000);
+  const samplePool = await loadSamplePool(baseUrl, samplePoolSize);
+  const randomSeed = readPositiveNumber("QUERY_RANDOM_SEED", 20_260_714) + patternSeed(pattern);
+  const random = createSeededRandom(randomSeed);
   await waitForScheduledStart();
-  const transport = queryUrl.protocol === "https:" ? https : http;
-  const Agent = queryUrl.protocol === "https:" ? https.Agent : http.Agent;
+  const transport = baseUrl.protocol === "https:" ? https : http;
+  const Agent = baseUrl.protocol === "https:" ? https.Agent : http.Agent;
   const agent = new Agent({
     keepAlive: true,
     maxSockets: readPositiveNumber("QUERY_MAX_SOCKETS", maxInFlight),
@@ -97,6 +97,7 @@ async function main() {
   const startedAt = performance.now();
   const measurementEndsAt = startedAt + durationMs;
   let handledSlots = 0;
+  const sampledKeys = new Set<string>();
 
   console.log(
     `${pattern}: target=${targetRps} requests/sec duration=${testTimeSeconds}s max_in_flight=${maxInFlight}`
@@ -104,6 +105,9 @@ async function main() {
 
   await new Promise<void>((resolve) => {
     const startRequest = () => {
+      const sample = selectQuerySample(samplePool, pattern, random);
+      sampledKeys.add(sampleIdentity(pattern, sample));
+      const queryUrl = makeQueryUrl(baseUrl, pattern, sample);
       counters.started += 1;
       counters.inFlight += 1;
       counters.peakInFlight = Math.max(counters.peakInFlight, counters.inFlight);
@@ -195,6 +199,9 @@ async function main() {
     counters.succeeded === 0 ? 0 : counters.redisCommands / counters.succeeded;
   const result = {
     pattern,
+    random_seed: randomSeed,
+    sample_pool_size: Object.fromEntries(Object.entries(samplePool).map(([name, values]) => [name, values.length])),
+    distinct_sample_keys: sampledKeys.size,
     target_rps: targetRps,
     achieved_rps: round(counters.succeededDuringWindow / testTimeSeconds),
     achieved_redis_ops_per_second: round(counters.redisCommandsDuringWindow / testTimeSeconds),
@@ -232,27 +239,29 @@ async function main() {
   console.log(JSON.stringify(result, null, 2));
   console.log(`Wrote ${outputPath}`);
 
-  if (counters.httpErrors > 0 || counters.requestErrors > 0) {
+  if (counters.httpErrors > 0 || counters.requestErrors > 0 || counters.dropped > 0) {
     process.exitCode = 1;
   }
 }
 
-async function loadSamples(baseUrl: URL): Promise<QuerySamples> {
+async function loadSamplePool(baseUrl: URL, count: number): Promise<BenchmarkSamplePool> {
   const timeoutMs = readPositiveNumber("QUERY_STARTUP_TIMEOUT_MS", 60_000);
   const startedAt = performance.now();
   let lastError: unknown;
 
   while (performance.now() - startedAt < timeoutMs) {
     try {
-      const response = await fetch(new URL("/api/samples", baseUrl), {
+      const samplesUrl = new URL("/api/samples", baseUrl);
+      samplesUrl.searchParams.set("count", String(Math.floor(count)));
+      const response = await fetch(samplesUrl, {
         cache: "no-store",
         signal: AbortSignal.timeout(Math.min(timeoutMs, 5_000))
       });
-      const body = (await response.json()) as { samples?: QuerySamples; error?: string };
-      if (!response.ok || !body.samples || body.error) {
+      const body = (await response.json()) as { sample_pool?: BenchmarkSamplePool; error?: string };
+      if (!response.ok || !body.sample_pool || body.error) {
         throw new Error(body.error ?? `Sample endpoint returned HTTP ${response.status}`);
       }
-      return body.samples;
+      return body.sample_pool;
     } catch (error) {
       lastError = error;
       await sleep(500);
@@ -266,7 +275,7 @@ async function loadSamples(baseUrl: URL): Promise<QuerySamples> {
   );
 }
 
-function makeQueryUrl(baseUrl: URL, pattern: QueryPattern, samples: QuerySamples): URL {
+function makeQueryUrl(baseUrl: URL, pattern: QueryPattern, samples: QuerySample): URL {
   const url = new URL("/api/query", baseUrl);
   url.search = new URLSearchParams({
     pattern,
@@ -281,15 +290,46 @@ function makeQueryUrl(baseUrl: URL, pattern: QueryPattern, samples: QuerySamples
   return url;
 }
 
-function isQueryPattern(value: string | undefined): value is QueryPattern {
-  return value !== undefined && value in QUERY_PATTERNS;
-}
-
 function readPositiveNumber(name: string, fallback: number): number {
   const value = process.env[name];
   if (!value) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isLoadQueryPattern(value: string | undefined): value is LoadQueryPattern {
+  return value !== undefined && value in QUERY_PROFILES;
+}
+
+function patternSeed(pattern: QueryPattern): number {
+  return [...pattern].reduce((seed, character) => Math.imul(seed, 31) + character.charCodeAt(0), 0) >>> 0;
+}
+
+function sampleIdentity(pattern: QueryPattern, sample: QuerySample): string {
+  switch (pattern) {
+    case "accountById":
+    case "positionsByAccount":
+    case "accountPortfolioJoin":
+    case "accountActivityJoin":
+    case "accountSnapshot":
+      return sample.account_id;
+    case "securityById":
+      return sample.security_id;
+    case "securityByNo":
+      return sample.security_no;
+    case "positionByComposite":
+      return `${sample.account_id}|${sample.security_no}|${sample.acct_type_code}`;
+    case "transactionById":
+      return sample.transaction_id;
+    case "transactionsByComposite":
+      return `${sample.account_id}|${sample.security_id}|${sample.trade_date}|${sample.acct_type_code}`;
+    case "transactionsByAccount":
+      return sample.account_id;
+    case "transactionsBySecurity":
+      return sample.security_id;
+    case "transactionsByAccountSecurity":
+      return `${sample.account_id}|${sample.security_id}`;
+  }
 }
 
 function positiveHeaderNumber(value: string | string[] | undefined): number {

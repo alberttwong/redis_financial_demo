@@ -97,6 +97,15 @@ resource "aws_vpc_security_group_ingress_rule" "web" {
   description       = "HTTP access to the ad hoc query workbench"
 }
 
+resource "aws_vpc_security_group_ingress_rule" "web_from_generator" {
+  security_group_id            = aws_security_group.runner.id
+  referenced_security_group_id = aws_security_group.runner.id
+  from_port                    = var.web_port
+  ip_protocol                  = "tcp"
+  to_port                      = var.web_port
+  description                  = "Private query API access from the load generator"
+}
+
 resource "aws_vpc_security_group_egress_rule" "all" {
   security_group_id = aws_security_group.runner.id
   cidr_ipv4         = "0.0.0.0/0"
@@ -104,7 +113,12 @@ resource "aws_vpc_security_group_egress_rule" "all" {
   description       = "Outbound access for package installs and Redis Cloud"
 }
 
-resource "aws_instance" "runner" {
+moved {
+  from = aws_instance.runner
+  to   = aws_instance.api
+}
+
+resource "aws_instance" "api" {
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.instance_type
   subnet_id                   = coalesce(var.subnet_id, data.aws_subnets.default_public.ids[0])
@@ -115,7 +129,30 @@ resource "aws_instance" "runner" {
   user_data_replace_on_change = true
   user_data                   = file("${path.module}/user-data.sh")
   tags = merge(local.tags, {
-    Name = var.name_prefix
+    Name = "${var.name_prefix}-api"
+    Role = "redis-query-api"
+  })
+
+  root_block_device {
+    volume_size = var.root_volume_size_gb
+    volume_type = "gp3"
+    encrypted   = true
+  }
+}
+
+resource "aws_instance" "generator" {
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.generator_instance_type
+  subnet_id                   = coalesce(var.subnet_id, data.aws_subnets.default_public.ids[0])
+  associate_public_ip_address = true
+  key_name                    = var.key_name
+  vpc_security_group_ids      = [aws_security_group.runner.id]
+  iam_instance_profile        = aws_iam_instance_profile.runner.name
+  user_data_replace_on_change = true
+  user_data                   = file("${path.module}/user-data.sh")
+  tags = merge(local.tags, {
+    Name = "${var.name_prefix}-generator"
+    Role = "redis-load-generator"
   })
 
   root_block_device {

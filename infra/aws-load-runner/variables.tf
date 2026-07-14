@@ -11,7 +11,13 @@ variable "name_prefix" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type for the benchmark runner."
+  description = "EC2 instance type for the dedicated query API host."
+  type        = string
+  default     = "c7i.4xlarge"
+}
+
+variable "generator_instance_type" {
+  description = "EC2 instance type for the dedicated load-generator host."
   type        = string
   default     = "c7i.4xlarge"
 }
@@ -53,7 +59,9 @@ variable "root_volume_size_gb" {
 }
 
 variable "tags" {
-  description = "Extra tags to add to all resources."
+  description = "Extra tags to add to all resources. The default owner tag is required by the AWS account cleanup automation."
   type        = map(string)
-  default     = {}
+  default = {
+    owner = "albert_wong"
+  }
 }

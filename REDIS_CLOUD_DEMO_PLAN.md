@@ -259,7 +259,7 @@ The 12 query-pattern profiles call `/api/query` so each load test follows the sa
 - Ten other query patterns: 10,000 reads/sec each
 - Atomic transaction writes: 30,000 writes/sec
 
-The combined target is 230,000 client operations/sec. It is not a Redis command-rate target: collection searches use one projected `FT.SEARCH`, while joins still issue additional account and related-security reads. Query runners use persistent HTTP connections and valid seeded identifiers from `/api/samples`, and record both HTTP request rate and estimated Redis command rate. The transaction writer uses `memtier_benchmark` with `FCALL apply_transaction`, unique transaction keys, tunable threads, clients, pipeline depth, and a total target rate that is divided across connections.
+The combined target is 230,000 client operations/sec. It is not a Redis command-rate target: collection searches use one projected `FT.SEARCH`, while joins still issue additional account and related-security reads. Query runners use persistent HTTP connections and choose a new pattern-appropriate identifier from Redis-backed `/api/samples` pools for each request. They record HTTP request rate, estimated Redis command rate, sample-pool sizes, and distinct keys exercised. The distributed transaction writer selects many existing positions and uses each position identity as the matching transaction hash tag, so `FCALL apply_transaction` remains atomic while aggregate writes spread across Redis Cluster slots. The former single-position memtier profile remains available only as a hot-slot diagnostic.
 
 `transactionsByComposite` remains a workbench query but is outside this 12-query concurrent load profile.
 

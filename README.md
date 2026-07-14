@@ -96,7 +96,7 @@ Quantity rules are `BUY = +quantity`, `SELL = -quantity`, and no quantity change
 
 After the transaction/position Function completes, the runtime API calls `update_account_snapshot` against `acct-snapshot:{account_id}`. That Function atomically patches the embedded position, prepends the transaction to the retained recent-transaction window, updates counts and totals, and advances `generated_at`. Position projection versions prevent concurrent requests from overwriting a newer embedded position with an older result. If the snapshot is missing, the API builds it from the live account data and reapplies the idempotent incremental update.
 
-The source transaction/position commit and the account-snapshot projection are two separate atomic operations because their keys intentionally occupy different Redis Cluster hash slots. A snapshot failure therefore cannot roll back an already-committed transaction, but replaying the request repairs the retained snapshot projection without applying the position quantity twice. The direct memtier `FCALL apply_transaction` benchmark measures only the source transaction/position projection; automatic snapshot maintenance is part of `POST /api/transactions`.
+The source transaction/position commit and the account-snapshot projection are two separate atomic operations because their keys intentionally occupy different Redis Cluster hash slots. A snapshot failure therefore cannot roll back an already-committed transaction, but replaying the request repairs the retained snapshot projection without applying the position quantity twice. The direct distributed `FCALL apply_transaction` benchmark measures only the source transaction/position projection; automatic snapshot maintenance is part of `POST /api/transactions`.
 
 On startup, the web workbench calls `/api/samples` to discover working seeded values for account, security, position, and transaction examples. This keeps secondary-index and composite-key examples from defaulting to IDs that do not exist in the current Redis Cloud dataset.
 
@@ -294,7 +294,7 @@ npm run bench:concurrent
 
 The newer `transactionsByComposite` UI pattern remains available in the workbench but is not part of this 12-query concurrent profile.
 
-Each query runner obtains valid seeded identifiers from `/api/samples`, uses persistent HTTP connections, and writes HTTP request rate, estimated Redis command rate, latency percentiles, errors, and response throughput to `memtier-output/query-<pattern>.json`. `x-redis-command-count` reports how many Redis commands each successful HTTP request issued. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
+Each query runner obtains a Redis-backed pool of valid seeded identifiers from `/api/samples?count=<n>` and selects a new pattern-appropriate sample for every request. Account reads spread across account IDs, security reads use valid securities, and composite position/transaction reads preserve correlated key fields. Persistent HTTP connections are reused, and each runner writes HTTP request rate, estimated Redis command rate, latency percentiles, errors, response throughput, random seed, sample-pool sizes, and the number of distinct keys actually exercised to `memtier-output/query-<pattern>.json`. `x-redis-command-count` reports how many Redis commands each successful HTTP request issued. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
 
 Useful tuning knobs:
 
@@ -304,6 +304,8 @@ QUERY_DEFAULT_TARGET_RPS=10000
 QUERY_JOIN_TARGET_RPS=50000
 QUERY_TEST_TIME=60
 QUERY_MAX_IN_FLIGHT=2000
+QUERY_SAMPLE_POOL_SIZE=1000
+QUERY_RANDOM_SEED=20260714
 ```
 
 The 230,000 client-op target is not equivalent to 230,000 Redis operations: collection searches now use one projected `FT.SEARCH`, but joins still issue one direct account read plus one search and one projected `JSON.GET` per distinct security. The benchmark summary reports both rates. Compare the estimated Redis operation target with the current Terraform throughput default of 180,000 operations/sec; an unchanged deployment may throttle or miss the requested rates.
@@ -327,7 +329,7 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The helper copies the current repo and `.env.local` to the EC2 host, starts the Next.js query workbench on port `3000`, and runs all 12 query tests plus trade writes through `bench:concurrent`. It redacts the memtier auth field and downloads results to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
+The helper copies the current repo and `.env.local` to two EC2 hosts. The API host builds and serves Next.js on port `3000`; the generator host runs all 12 HTTP query generators plus the distributed trade writer against the API host's private IP. This prevents the load generators from competing with the API process for CPU and network bandwidth. Results and the API web log are downloaded to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
 
 ## Initial Load Profile
 
@@ -393,25 +395,31 @@ Account rows are compact metadata documents without synthetic payloads. Larger p
 
 ## Trade Write Load Testing
 
-The trade-write workload emits `FCALL apply_transaction` commands with unique transaction keys. It writes each new transaction and atomically updates one load-test position, so every measured request executes the projection path rather than becoming an idempotent replay.
+The default trade-write workload emits `FCALL apply_transaction` commands with unique transaction keys. At startup it samples existing positions from Redis Query Engine, then selects a position for every operation. Each transaction key retains the chosen position key as its Redis hash tag, preserving atomic transaction-position updates while distributing aggregate writes across many cluster slots.
 
 ```sh
 npm run bench:trade-writes
 ```
 
-The default 30,000 writes/sec target is divided evenly across the configured memtier connections:
+Useful tuning knobs:
 
 ```text
 MEMTIER_TRADE_TARGET_RPS=30000
-MEMTIER_TRADE_THREADS=4
-MEMTIER_TRADE_CLIENTS=50
-
-30000 / (4 * 50) = 150 writes/sec per connection
+TRADE_MAX_IN_FLIGHT=10000
+TRADE_SAMPLE_POOL_SIZE=1000
+TRADE_RANDOM_SEED=20260714
+MEMTIER_TRADE_PAYLOAD_BYTES=1024
 ```
 
-Install `memtier_benchmark` before running trade writes. The wrapper loads `.env.local` and derives its Redis connection settings from `REDIS_URL`. For TLS Redis Cloud endpoints, it passes `--tls-skip-verify` by default because macOS memtier builds may not use the system Keychain CA store. Set `MEMTIER_TLS_CACERT=/path/to/ca-bundle.pem` to verify with an explicit CA bundle.
+The distributed writer uses the same multiplexed Redis connection pool as the application and records offered, achieved, dropped, duplicate, error, and latency metrics in `memtier-output/trade-writes.json`. It intentionally exercises `apply_transaction` directly and does not refresh the separate account snapshot read model.
 
-Trade writes use memtier-generated keys with a run-specific `txn:{pos:A00000001:SPX000001:LOAD}:load:<run-id>:` prefix and parallel sequential key allocation. Each write inserts a new transaction and atomically updates `pos:A00000001:SPX000001:LOAD`. `MEMTIER_TRADE_RUN_ID`, `MEMTIER_TRADE_KEY_MAXIMUM`, and `MEMTIER_TRADE_PAYLOAD_BYTES` tune the generated key space and JSON payload size.
+The former single-position memtier workload remains available as an explicit hot-slot diagnostic:
+
+```sh
+npm run bench:trade-writes:hot-slot
+```
+
+That diagnostic requires `memtier_benchmark` and intentionally directs every operation to `pos:A00000001:SPX000001:LOAD`.
 
 ## Redis Cloud
 

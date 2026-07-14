@@ -29,7 +29,7 @@ fi
 
 if ! command -v memtier_benchmark >/dev/null 2>&1; then
   cat >&2 <<EOF
-memtier_benchmark is required for bench:trade-writes.
+memtier_benchmark is required for bench:trade-writes:hot-slot.
 
 Install it on macOS with:
   brew install memtier_benchmark
