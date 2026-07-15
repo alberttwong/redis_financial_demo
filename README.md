@@ -329,7 +329,7 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The default stack creates 16 one-process `c7i.large` API workers across the default VPC's availability zones, registers them behind an internal Application Load Balancer, and keeps one `c7i.4xlarge` generator host separate. Each API worker starts with `API_REDIS_POOL_SIZE=16`, for at most 256 persistent application connections. The runner waits for every ALB target, runs generators only from the dedicated host, and downloads query, Redis, per-worker runtime, and web-log artifacts to `memtier-output/aws-load-runner/`.
+The default stack creates 16 one-process `c7i.large` API workers across the default VPC's availability zones, registers them behind an internal Application Load Balancer, and keeps one `c7i.4xlarge` generator host separate. Each API worker starts with `API_REDIS_POOL_SIZE=16`, for at most 256 persistent application connections. The runner waits for every ALB target, runs generators only from the dedicated host, and downloads query, Redis, per-worker runtime, and web-log artifacts to `memtier-output/aws-load-runner/`. Set `QUERY_GENERATOR_PROCESSES=4` for the synchronized multi-process `accountById` experiment; the total target rate and socket limits are divided across processes and their latency histograms are merged afterward.
 
 Run the isolated randomized point-read scale gate with:
 

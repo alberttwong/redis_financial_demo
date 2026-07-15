@@ -206,6 +206,14 @@ async function main() {
   const result = {
     pattern,
     random_seed: randomSeed,
+    ...(process.env.QUERY_GENERATOR_SHARD_INDEX
+      ? {
+          generator_shard: {
+            index: readPositiveNumber("QUERY_GENERATOR_SHARD_INDEX", 1),
+            count: readPositiveNumber("QUERY_GENERATOR_SHARD_COUNT", 1)
+          }
+        }
+      : {}),
     sample_pool_size: Object.fromEntries(Object.entries(samplePool).map(([name, values]) => [name, values.length])),
     distinct_sample_keys: sampledKeys.size,
     target_rps: targetRps,
@@ -239,6 +247,9 @@ async function main() {
       p99: percentile(latencyHistogram, counters.completed, 0.99),
       p99_9: percentile(latencyHistogram, counters.completed, 0.999)
     },
+    ...(process.env.QUERY_EXPORT_LATENCY_HISTOGRAM === "1"
+      ? { latency_histogram_ms: sparseHistogram(latencyHistogram) }
+      : {}),
     base_url: baseUrl.origin
   };
 
@@ -246,7 +257,8 @@ async function main() {
   await mkdir(outputDirectory, { recursive: true });
   const outputPath = `${outputDirectory}/query-${profile.slug}.json`;
   await writeFile(outputPath, JSON.stringify(result, null, 2) + "\n");
-  console.log(JSON.stringify(result, null, 2));
+  const { latency_histogram_ms: _latencyHistogram, ...consoleResult } = result;
+  console.log(JSON.stringify(consoleResult, null, 2));
   console.log(`Wrote ${outputPath}`);
 
   if (counters.httpErrors > 0 || counters.requestErrors > 0 || counters.dropped > 0) {
@@ -385,6 +397,14 @@ function percentile(histogram: Uint32Array, total: number, quantile: number): nu
     if (seen >= target) return index;
   }
   return histogram.length - 1;
+}
+
+function sparseHistogram(histogram: Uint32Array): Array<[number, number]> {
+  const buckets: Array<[number, number]> = [];
+  for (let index = 0; index < histogram.length; index += 1) {
+    if (histogram[index] > 0) buckets.push([index, histogram[index]]);
+  }
+  return buckets;
 }
 
 function round(value: number): number {

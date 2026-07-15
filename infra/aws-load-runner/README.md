@@ -64,6 +64,23 @@ API_REDIS_POOL_SIZE=16 \
   npm run bench:aws-runner
 ```
 
+To divide that same target across four synchronized Node processes on the dedicated generator host:
+
+```sh
+AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem \
+AWS_LOAD_RUNNER_BENCHMARK=accountById \
+QUERY_GENERATOR_PROCESSES=4 \
+QUERY_DEFAULT_TARGET_RPS=10000 \
+QUERY_TEST_TIME=60 \
+QUERY_MAX_IN_FLIGHT=10000 \
+QUERY_MAX_SOCKETS=10000 \
+QUERY_SAMPLE_POOL_SIZE=1000 \
+API_REDIS_POOL_SIZE=16 \
+  npm run bench:aws-runner
+```
+
+The sharded runner divides the aggregate request rate, in-flight ceiling, and HTTP socket budget across the processes, gives each process a distinct deterministic random seed, and releases all processes through one epoch-time barrier. It merges the per-process latency histograms so the aggregate percentiles remain exact. Each run writes per-process artifacts plus `query-account-by-id-aggregate.json` under a timestamped `memtier-output/query-account-by-id-<count>-shards-*` directory.
+
 The helper:
 
 1. Syncs the repository and `.env.local` to the generator and every API worker.

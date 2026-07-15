@@ -9,6 +9,7 @@ SSH_KEY_PATH="${AWS_LOAD_RUNNER_KEY_PATH:-}"
 WEB_PORT="${AWS_LOAD_RUNNER_WEB_PORT:-3000}"
 BENCHMARK="${AWS_LOAD_RUNNER_BENCHMARK:-concurrent}"
 API_REDIS_POOL_SIZE="${API_REDIS_POOL_SIZE:-16}"
+QUERY_GENERATOR_PROCESSES="${QUERY_GENERATOR_PROCESSES:-1}"
 AWS_REGION="${AWS_REGION:-us-west-2}"
 
 if [[ -z "$SSH_KEY_PATH" ]]; then
@@ -154,7 +155,15 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
 
 case "$BENCHMARK" in
   accountById)
-    benchmark_command="npm run bench:query:account-by-id"
+    if [[ ! "$QUERY_GENERATOR_PROCESSES" =~ ^[0-9]+$ ]] || [[ "$QUERY_GENERATOR_PROCESSES" -lt 1 ]]; then
+      echo "QUERY_GENERATOR_PROCESSES must be a positive integer." >&2
+      exit 1
+    fi
+    if [[ "$QUERY_GENERATOR_PROCESSES" -gt 1 ]]; then
+      benchmark_command="npm run bench:query:account-by-id:sharded"
+    else
+      benchmark_command="npm run bench:query:account-by-id"
+    fi
     default_max_in_flight=10000
     ;;
   concurrent)
@@ -180,6 +189,9 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
    QUERY_MAX_FREE_SOCKETS='${QUERY_MAX_FREE_SOCKETS:-512}' \
    QUERY_SAMPLE_POOL_SIZE='${QUERY_SAMPLE_POOL_SIZE:-1000}' \
    QUERY_RANDOM_SEED='${QUERY_RANDOM_SEED:-20260714}' \
+   QUERY_GENERATOR_PROCESSES='${QUERY_GENERATOR_PROCESSES}' \
+   QUERY_SHARD_START_DELAY_SECONDS='${QUERY_SHARD_START_DELAY_SECONDS:-10}' \
+   QUERY_RUN_ID='${QUERY_RUN_ID:-}' \
    MEMTIER_TRADE_TARGET_RPS='${MEMTIER_TRADE_TARGET_RPS:-30000}' \
    TRADE_MAX_IN_FLIGHT='${TRADE_MAX_IN_FLIGHT:-10000}' \
    TRADE_SAMPLE_POOL_SIZE='${TRADE_SAMPLE_POOL_SIZE:-1000}' \
@@ -214,6 +226,7 @@ echo "Downloaded generator results to memtier-output/aws-load-runner"
 echo "Query API workers: ${#API_HOSTS[@]}"
 echo "Redis connections per API worker: ${API_REDIS_POOL_SIZE}"
 echo "Load-generator host: ${GENERATOR_HOST}"
+echo "Load-generator processes: ${QUERY_GENERATOR_PROCESSES}"
 echo "Load-balanced query API: ${QUERY_BASE_URL}"
 
 exit "$benchmark_status"
