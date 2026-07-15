@@ -329,7 +329,20 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The helper copies the current repo and `.env.local` to two EC2 hosts. The API host builds and serves Next.js on port `3000`; the generator host runs all 12 HTTP query generators plus the distributed trade writer against the API host's private IP. This prevents the load generators from competing with the API process for CPU and network bandwidth. Results and the API web log are downloaded to `memtier-output/aws-load-runner/`. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows your browser to reach it.
+The default stack creates 16 one-process `c7i.large` API workers across the default VPC's availability zones, registers them behind an internal Application Load Balancer, and keeps one `c7i.4xlarge` generator host separate. Each API worker starts with `API_REDIS_POOL_SIZE=16`, for at most 256 persistent application connections. The runner waits for every ALB target, runs generators only from the dedicated host, and downloads query, Redis, per-worker runtime, and web-log artifacts to `memtier-output/aws-load-runner/`.
+
+Run the isolated randomized point-read scale gate with:
+
+```sh
+AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem \
+AWS_LOAD_RUNNER_BENCHMARK=accountById \
+QUERY_DEFAULT_TARGET_RPS=10000 \
+QUERY_MAX_IN_FLIGHT=10000 \
+QUERY_SAMPLE_POOL_SIZE=1000 \
+  npm run bench:aws-runner
+```
+
+Use `AWS_LOAD_RUNNER_BENCHMARK=concurrent` (the default) for the complete 12-query plus trade-write profile. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows browser access and `generator_query_url` for the private load-balanced route.
 
 ## Initial Load Profile
 

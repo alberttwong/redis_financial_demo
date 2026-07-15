@@ -22,6 +22,7 @@
     "seed:initial-load": "bash scripts/seed-initial-load.sh",
     "smoke": "node --env-file-if-exists=.env.local --import tsx scripts/smoke.ts",
     "smoke:transactions": "node --env-file-if-exists=.env.local --import tsx scripts/smoke-transaction-write.ts",
+    "metrics:redis": "node --env-file-if-exists=.env.local --import tsx scripts/capture-redis-metrics.ts",
     "bench:trade-writes": "npm run redis:functions && node --env-file-if-exists=.env.local --import tsx scripts/load-trade-writes.ts",
     "bench:trade-writes:hot-slot": "bash scripts/memtier-trade-writes.sh",
     "bench:query:account-by-id": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountById",

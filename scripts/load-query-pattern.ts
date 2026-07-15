@@ -98,6 +98,8 @@ async function main() {
   const measurementEndsAt = startedAt + durationMs;
   let handledSlots = 0;
   const sampledKeys = new Set<string>();
+  const httpStatusCounts = new Map<string, number>();
+  const requestErrorCounts = new Map<string, number>();
 
   console.log(
     `${pattern}: target=${targetRps} requests/sec duration=${testTimeSeconds}s max_in_flight=${maxInFlight}`
@@ -114,13 +116,17 @@ async function main() {
       const requestStartedAt = performance.now();
       let finished = false;
 
-      const finish = (statusCode?: number, bytes = 0, redisCommands = 0, requestFailed = false) => {
+      const finish = (statusCode?: number, bytes = 0, redisCommands = 0, requestError?: unknown) => {
         if (finished) return;
         finished = true;
         counters.inFlight -= 1;
         counters.completed += 1;
         counters.responseBytes += bytes;
-        if (requestFailed) counters.requestErrors += 1;
+        if (statusCode !== undefined) incrementCount(httpStatusCounts, String(statusCode));
+        if (requestError !== undefined) {
+          counters.requestErrors += 1;
+          incrementCount(requestErrorCounts, requestErrorName(requestError));
+        }
         else if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
           counters.succeeded += 1;
           counters.redisCommands += redisCommands;
@@ -150,11 +156,11 @@ async function main() {
             bytes += chunk.length;
           });
           response.on("end", () => finish(response.statusCode, bytes, redisCommands));
-          response.on("error", () => finish(response.statusCode, bytes, redisCommands, true));
+          response.on("error", (error) => finish(response.statusCode, bytes, redisCommands, error));
         }
       );
       request.setTimeout(requestTimeoutMs, () => request.destroy(new Error("request timeout")));
-      request.on("error", () => finish(undefined, 0, 0, true));
+      request.on("error", (error) => finish(undefined, 0, 0, error));
       request.end();
     };
 
@@ -217,7 +223,11 @@ async function main() {
     dropped_requests: counters.dropped,
     http_errors: counters.httpErrors,
     request_errors: counters.requestErrors,
-    error_rate: counters.completed === 0 ? 0 : round((counters.httpErrors + counters.requestErrors) / counters.completed),
+    http_status_counts: Object.fromEntries(httpStatusCounts),
+    request_error_counts: Object.fromEntries(requestErrorCounts),
+    error_rate: counters.completed === 0
+      ? 0
+      : roundTo((counters.httpErrors + counters.requestErrors) / counters.completed, 6),
     response_bytes: counters.responseBytes,
     redis_commands: counters.redisCommands,
     redis_commands_per_successful_request: round(redisCommandsPerSuccessfulRequest),
@@ -337,6 +347,19 @@ function positiveHeaderNumber(value: string | string[] | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function incrementCount(counts: Map<string, number>, name: string): void {
+  counts.set(name, (counts.get(name) ?? 0) + 1);
+}
+
+function requestErrorName(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
+    return error.code;
+  }
+  if (error instanceof Error && error.message === "request timeout") return "request_timeout";
+  if (error instanceof Error) return error.name;
+  return "unknown";
+}
+
 async function waitForScheduledStart(): Promise<void> {
   const value = process.env.LOAD_TEST_START_AT_EPOCH_MS;
   if (!value) return;
@@ -366,6 +389,11 @@ function percentile(histogram: Uint32Array, total: number, quantile: number): nu
 
 function round(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function roundTo(value: number, decimalPlaces: number): number {
+  const factor = 10 ** decimalPlaces;
+  return Math.round(value * factor) / factor;
 }
 
 function sleep(ms: number): Promise<void> {
