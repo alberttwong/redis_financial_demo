@@ -49,23 +49,38 @@ output "api_private_ips" {
 }
 
 output "generator_instance_id" {
-  description = "EC2 instance ID for the load-generator host."
-  value       = aws_instance.generator.id
+  description = "Legacy alias for the first load-generator instance ID."
+  value       = aws_instance.generator[0].id
 }
 
 output "generator_public_ip" {
-  description = "Public IP used to sync and manage the load-generator host."
-  value       = aws_instance.generator.public_ip
+  description = "Legacy alias for the first load-generator public IP."
+  value       = aws_instance.generator[0].public_ip
 }
 
 output "generator_public_dns" {
-  description = "Public DNS name used to sync and manage the load-generator host."
-  value       = aws_instance.generator.public_dns
+  description = "Legacy alias for the first load-generator public DNS name."
+  value       = aws_instance.generator[0].public_dns
 }
 
 output "generator_private_ip" {
-  description = "Private IP for the load-generator host."
-  value       = aws_instance.generator.private_ip
+  description = "Legacy alias for the first load-generator private IP."
+  value       = aws_instance.generator[0].private_ip
+}
+
+output "generator_instance_ids" {
+  description = "EC2 instance IDs for all dedicated load-generator hosts."
+  value       = aws_instance.generator[*].id
+}
+
+output "generator_public_dns_names" {
+  description = "Public DNS names used to sync and manage all load-generator hosts."
+  value       = aws_instance.generator[*].public_dns
+}
+
+output "generator_private_ips" {
+  description = "Private IPs for all dedicated load-generator hosts."
+  value       = aws_instance.generator[*].private_ip
 }
 
 output "ssh_user" {
@@ -76,8 +91,9 @@ output "ssh_user" {
 output "ready_check" {
   description = "Commands to check bootstrap status on the benchmark hosts."
   value = {
-    api       = [for instance in aws_instance.api : "ssh ec2-user@${instance.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"]
-    generator = "ssh ec2-user@${aws_instance.generator.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"
+    api        = [for instance in aws_instance.api : "ssh ec2-user@${instance.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"]
+    generator  = "ssh ec2-user@${aws_instance.generator[0].public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"
+    generators = [for instance in aws_instance.generator : "ssh ec2-user@${instance.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"]
   }
 }
 
@@ -87,7 +103,7 @@ output "web_url" {
 }
 
 output "generator_query_url" {
-  description = "Private load-balanced query API URL used by the load-generator host."
+  description = "Private load-balanced query API URL used by the load-generator hosts."
   value       = "http://${aws_lb.api.dns_name}:${var.web_port}"
 }
 

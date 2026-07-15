@@ -26,6 +26,7 @@
     "bench:trade-writes": "npm run redis:functions && node --env-file-if-exists=.env.local --import tsx scripts/load-trade-writes.ts",
     "bench:trade-writes:hot-slot": "bash scripts/memtier-trade-writes.sh",
     "bench:query:account-by-id": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountById",
+    "bench:query:account-by-id:sharded": "bash scripts/bench-sharded-account-by-id.sh",
     "bench:query:security-by-id": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts securityById",
     "bench:query:security-by-no": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts securityByNo",
     "bench:query:position-by-composite": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts positionByComposite",
