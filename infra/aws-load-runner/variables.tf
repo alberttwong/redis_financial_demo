@@ -28,9 +28,20 @@ variable "api_instance_count" {
 }
 
 variable "generator_instance_type" {
-  description = "EC2 instance type for the dedicated load-generator host."
+  description = "EC2 instance type for each dedicated load-generator host."
   type        = string
-  default     = "c7i.4xlarge"
+  default     = "c7i.large"
+}
+
+variable "generator_instance_count" {
+  description = "Number of dedicated load-generator hosts distributed across the available public subnets."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.generator_instance_count >= 1 && var.generator_instance_count <= 16
+    error_message = "generator_instance_count must be between 1 and 16."
+  }
 }
 
 variable "key_name" {

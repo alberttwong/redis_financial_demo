@@ -11,7 +11,7 @@ type LatencySummary = {
 type ShardResult = {
   pattern: string;
   random_seed: number;
-  generator_shard?: { index: number; count: number };
+  generator_shard?: { index: number; count: number; host?: string };
   distinct_sample_keys: number;
   target_rps: number;
   achieved_rps: number;
@@ -86,10 +86,18 @@ async function main() {
   const redisCommands = sum(shards, "redis_commands");
   const httpErrors = sum(shards, "http_errors");
   const requestErrors = sum(shards, "request_errors");
+  const generatorHosts = [
+    ...new Set(
+      shards
+        .map(({ result }) => result.generator_shard?.host)
+        .filter((host): host is string => Boolean(host))
+    )
+  ];
   const aggregate = {
-    experiment: "sharded-query-load",
+    experiment: generatorHosts.length > 1 ? "distributed-query-load" : "sharded-query-load",
     pattern: first.pattern,
     generator_processes: shards.length,
+    generator_hosts: generatorHosts,
     target_rps: sum(shards, "target_rps"),
     achieved_rps: round(sum(shards, "achieved_rps")),
     achieved_redis_ops_per_second: round(sum(shards, "achieved_redis_ops_per_second")),
@@ -128,6 +136,7 @@ async function main() {
     shards: shards.map(({ directory, result }) => ({
       directory,
       index: result.generator_shard?.index,
+      host: result.generator_shard?.host,
       random_seed: result.random_seed,
       target_rps: result.target_rps,
       achieved_rps: result.achieved_rps,

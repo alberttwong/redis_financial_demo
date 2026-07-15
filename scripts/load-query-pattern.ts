@@ -210,7 +210,8 @@ async function main() {
       ? {
           generator_shard: {
             index: readPositiveNumber("QUERY_GENERATOR_SHARD_INDEX", 1),
-            count: readPositiveNumber("QUERY_GENERATOR_SHARD_COUNT", 1)
+            count: readPositiveNumber("QUERY_GENERATOR_SHARD_COUNT", 1),
+            host: process.env.QUERY_GENERATOR_HOST ?? process.env.HOSTNAME
           }
         }
       : {}),

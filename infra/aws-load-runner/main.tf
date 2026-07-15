@@ -168,18 +168,25 @@ resource "aws_instance" "api" {
   }
 }
 
+moved {
+  from = aws_instance.generator
+  to   = aws_instance.generator[0]
+}
+
 resource "aws_instance" "generator" {
+  count                       = var.generator_instance_count
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.generator_instance_type
-  subnet_id                   = coalesce(var.subnet_id, data.aws_subnets.default_public.ids[0])
+  subnet_id                   = coalesce(var.subnet_id, element(data.aws_subnets.default_public.ids, count.index % length(data.aws_subnets.default_public.ids)))
   associate_public_ip_address = true
   key_name                    = var.key_name
   vpc_security_group_ids      = [aws_security_group.runner.id]
   iam_instance_profile        = aws_iam_instance_profile.runner.name
+  monitoring                  = true
   user_data_replace_on_change = true
   user_data                   = file("${path.module}/user-data.sh")
   tags = merge(local.tags, {
-    Name = "${var.name_prefix}-generator"
+    Name = "${var.name_prefix}-generator-${format("%02d", count.index + 1)}"
     Role = "redis-load-generator"
   })
 
