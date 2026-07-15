@@ -11,9 +11,20 @@ variable "name_prefix" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type for the dedicated query API host."
+  description = "EC2 instance type for each horizontally scaled query API worker."
   type        = string
-  default     = "c7i.4xlarge"
+  default     = "c7i.large"
+}
+
+variable "api_instance_count" {
+  description = "Number of one-process query API workers registered behind the internal load balancer."
+  type        = number
+  default     = 16
+
+  validation {
+    condition     = var.api_instance_count >= 2 && var.api_instance_count <= 32
+    error_message = "api_instance_count must be between 2 and 32."
+  }
 }
 
 variable "generator_instance_type" {

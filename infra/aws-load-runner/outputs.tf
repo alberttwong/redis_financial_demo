@@ -1,36 +1,51 @@
 output "instance_id" {
   description = "Legacy alias for the query API instance ID."
-  value       = aws_instance.api.id
+  value       = aws_instance.api[0].id
 }
 
 output "public_ip" {
   description = "Legacy alias for the query API public IP."
-  value       = aws_instance.api.public_ip
+  value       = aws_instance.api[0].public_ip
 }
 
 output "public_dns" {
   description = "Legacy alias for the query API public DNS name."
-  value       = aws_instance.api.public_dns
+  value       = aws_instance.api[0].public_dns
 }
 
 output "api_instance_id" {
-  description = "EC2 instance ID for the query API host."
-  value       = aws_instance.api.id
+  description = "Legacy alias for the first query API instance ID."
+  value       = aws_instance.api[0].id
 }
 
 output "api_public_ip" {
-  description = "Public IP used to sync and manage the query API host."
-  value       = aws_instance.api.public_ip
+  description = "Legacy alias for the first query API public IP."
+  value       = aws_instance.api[0].public_ip
 }
 
 output "api_public_dns" {
-  description = "Public DNS name used to sync and manage the query API host."
-  value       = aws_instance.api.public_dns
+  description = "Legacy alias for the first query API public DNS name."
+  value       = aws_instance.api[0].public_dns
 }
 
 output "api_private_ip" {
-  description = "Private IP used by the load generator to reach the query API."
-  value       = aws_instance.api.private_ip
+  description = "Legacy alias for the first query API private IP."
+  value       = aws_instance.api[0].private_ip
+}
+
+output "api_instance_ids" {
+  description = "EC2 instance IDs for all query API workers."
+  value       = aws_instance.api[*].id
+}
+
+output "api_public_dns_names" {
+  description = "Public DNS names used to sync and manage all query API workers."
+  value       = aws_instance.api[*].public_dns
+}
+
+output "api_private_ips" {
+  description = "Private IPs for all query API workers."
+  value       = aws_instance.api[*].private_ip
 }
 
 output "generator_instance_id" {
@@ -59,19 +74,29 @@ output "ssh_user" {
 }
 
 output "ready_check" {
-  description = "Commands to check bootstrap status on both benchmark hosts."
+  description = "Commands to check bootstrap status on the benchmark hosts."
   value = {
-    api       = "ssh ec2-user@${aws_instance.api.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"
+    api       = [for instance in aws_instance.api : "ssh ec2-user@${instance.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"]
     generator = "ssh ec2-user@${aws_instance.generator.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"
   }
 }
 
 output "web_url" {
   description = "Ad hoc public query workbench URL when web_ingress_cidr_blocks allows access."
-  value       = "http://${aws_instance.api.public_dns}:${var.web_port}"
+  value       = "http://${aws_instance.api[0].public_dns}:${var.web_port}"
 }
 
 output "generator_query_url" {
-  description = "Private query API URL used by the load-generator host."
-  value       = "http://${aws_instance.api.private_ip}:${var.web_port}"
+  description = "Private load-balanced query API URL used by the load-generator host."
+  value       = "http://${aws_lb.api.dns_name}:${var.web_port}"
+}
+
+output "api_load_balancer_dns" {
+  description = "Internal application load balancer DNS name for the API tier."
+  value       = aws_lb.api.dns_name
+}
+
+output "api_target_group_arn" {
+  description = "Target group ARN used to inspect API worker health and load balancer metrics."
+  value       = aws_lb_target_group.api.arn
 }
