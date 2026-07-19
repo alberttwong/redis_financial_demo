@@ -20,7 +20,7 @@ Defaults:
 - Subscription name: `lpl-redis-demo`
 - Database name: `lpl-query-patterns`
 - Dataset size: 20 GB
-- Throughput sizing: 180,000 operations per second
+- Throughput sizing: 300,000 operations per second
 - Endpoint access: public endpoint for local demo development. Use the Terraform `redis_tls` output to decide whether the app should use `redis://` or `rediss://`.
 - Eviction policy: `noeviction`, unless a later benchmark explicitly tests cache-style eviction
 
@@ -31,7 +31,7 @@ REDISCLOUD_ACCESS_KEY
 REDISCLOUD_SECRET_KEY
 ```
 
-The Terraform configuration should use Redis Cloud Pro/Flexible resources by default with `dataset_size_in_gb = 20`, `throughput_measurement_by = "operations-per-second"`, and `throughput_measurement_value = 180000`. Essentials should remain available as an explicit smaller-demo override, but Pro/Flexible is the default target for the performance demo.
+The Terraform configuration should use Redis Cloud Pro/Flexible resources by default with `dataset_size_in_gb = 20`, `throughput_measurement_by = "operations-per-second"`, and `throughput_measurement_value = 300000`. Essentials should remain available as an explicit smaller-demo override, but Pro/Flexible is the default target for the performance demo.
 
 Switching an existing Terraform-managed Essentials deployment to the default Pro/Flexible resource family creates Pro/Flexible resources and removes the Essentials resources from that state. Export or reseed demo data before applying that replacement.
 
@@ -254,14 +254,14 @@ The UI should compare runtime join timing against materialized snapshot timing s
 
 The 12 query-pattern profiles call `/api/query` so each load test follows the same direct lookup, projected secondary search, optional related-security hydration, join, and response path as the browser workbench. The default concurrent targets are:
 
-- `accountPortfolioJoin`: 50,000 reads/sec
-- `accountActivityJoin`: 50,000 reads/sec
-- Ten other query patterns: 10,000 reads/sec each
+- `accountPortfolioJoin`: 45,000 reads/sec
+- `accountActivityJoin`: 45,000 reads/sec
+- Ten other query patterns: 9,000 reads/sec each
 - Atomic transaction writes: 30,000 writes/sec
 
-The combined target is 230,000 client operations/sec. It is not a Redis command-rate target: collection searches use one projected `FT.SEARCH`, while joins still issue additional account and related-security reads. Query runners use persistent HTTP connections and choose a new pattern-appropriate identifier from Redis-backed `/api/samples` pools for each request. They record HTTP request rate, estimated Redis command rate, sample-pool sizes, and distinct keys exercised. The distributed transaction writer selects many existing positions and uses each position identity as the matching transaction hash tag, so `FCALL apply_transaction` remains atomic while aggregate writes spread across Redis Cluster slots. The former single-position memtier profile remains available only as a hot-slot diagnostic.
+The combined target is 210,000 client operations/sec. All current read paths issue one top-level `JSON.GET` or projected `FT.SEARCH`; writes issue one top-level `FCALL`, whose internal RedisJSON work still matters for database sizing. Query runners use persistent HTTP connections and choose a new pattern-appropriate identifier from Redis-backed `/api/samples` pools for each request. They record HTTP request rate, Redis command rate, sample-pool sizes, distinct keys, socket-queue timing, successful response bytes, error bytes, and API payload bytes. The distributed transaction writer selects many existing positions and uses each position identity as the matching transaction hash tag, so `FCALL apply_transaction` remains atomic while aggregate writes spread across Redis Cluster slots. The former single-position memtier profile remains available only as a hot-slot diagnostic.
 
-The AWS scale harness keeps generators on a dedicated host and distributes API traffic through an internal ALB to 16 one-process API workers. Each worker uses a bounded 16-connection Redis pool. The isolated `accountById` gate should be run before the full profile to verify the application tier can offer 10,000 randomized requests/sec without scheduler drops; Redis, worker-runtime, ALB, and error-category evidence should be retained with the query artifact.
+The AWS scale harness keeps generators on dedicated hosts and routes traffic to six cost-isolated API pools: light, positions, transaction collections, portfolio, activity, and snapshot. Each pool owns an Auto Scaling Group, target group, Redis connection budget, and hard pool limit. Per-pattern values are observable soft reservations that may borrow unused pool capacity. Large successful query bodies use a single data serialization while retaining the public JSON envelope and logical payload size. The isolated staircase suite should establish aggregate and per-target RPS at the latency/error SLO before request-count autoscaling is enabled or the full profile is attempted. Redis, worker-runtime, ALB, network, socket-queue, and error-category evidence should be retained with every query artifact.
 
 `transactionsByComposite` remains a workbench query but is outside this 12-query concurrent load profile.
 
@@ -324,7 +324,7 @@ Unit and integration test coverage should include:
 - Redis Cloud is the only Redis runtime target.
 - Terraform provisions Redis Cloud infrastructure.
 - Terraform uses the Redis Cloud account's default payment method.
-- Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 180,000 operations per second is the default target.
+- Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 300,000 operations per second is the default target.
 - SQL remains the source of truth.
 - Redis receives batched table extracts, not streaming CDC, for this demo.
 - Account info documents are compact metadata rows without synthetic payloads and are returned in full for single-account reads.

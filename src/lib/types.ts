@@ -62,11 +62,13 @@ export type AccountSnapshot = {
   _id: string;
   account_id: string;
   generated_at: string;
+  revision: number;
   account: AccountRow;
   position_count: number;
   transaction_count: number;
   total_market_value: number;
-  recent_transactions: TransactionProjection[];
+  recent_transactions: Array<TransactionProjection & { security?: SecurityProjection }>;
+  position_index: Record<string, number>;
   positions: Array<PositionProjection & { security?: SecurityProjection }>;
 };
 
@@ -78,13 +80,16 @@ export type Timings = {
   total_ms: number;
 };
 
-export type QueryResponse<T> = {
+export type QueryResult<T> = {
   data: T;
   timing: Timings;
   result_count: number;
-  payload_bytes: number;
   redis_command_count: number;
   commands: string[];
+};
+
+export type QueryResponse<T> = QueryResult<T> & {
+  payload_bytes: number;
 };
 
 export type SeedCounts = {

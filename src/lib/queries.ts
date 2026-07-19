@@ -1,8 +1,8 @@
 import { performance } from "node:perf_hooks";
 import type { RedisClientType } from "redis";
 import { INDEXES } from "./indexes";
-import { jsonBytes, measure, roundMs } from "./timing";
-import { jsonGet, jsonMGetFields } from "./json";
+import { measure, roundMs } from "./timing";
+import { jsonGet, jsonGetFields } from "./json";
 import {
   accountKey,
   positionKey,
@@ -22,7 +22,7 @@ import type {
   AccountSnapshot,
   PositionProjection,
   PositionRow,
-  QueryResponse,
+  QueryResult,
   SecurityProjection,
   SecurityRow,
   Timings,
@@ -52,7 +52,7 @@ function response<T>(
   resultCount: number,
   redisCommandCount: number,
   commands: string[]
-): QueryResponse<T> {
+): QueryResult<T> {
   return {
     data,
     timing: {
@@ -60,13 +60,12 @@ function response<T>(
       total_ms: roundMs(performance.now() - startedAt)
     },
     result_count: resultCount,
-    payload_bytes: jsonBytes(data),
     redis_command_count: redisCommandCount,
     commands
   };
 }
 
-export async function accountById(ctx: QueryContext, accountId: string): Promise<QueryResponse<AccountRow | null>> {
+export async function accountById(ctx: QueryContext, accountId: string): Promise<QueryResult<AccountRow | null>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const { value, ms } = await measure(() => jsonGet<AccountRow>(ctx.client, accountKey(accountId)));
@@ -74,7 +73,7 @@ export async function accountById(ctx: QueryContext, accountId: string): Promise
   return response(startedAt, value, timing, value ? 1 : 0, 1, [`JSON.GET ${accountKey(accountId)} $`]);
 }
 
-export async function securityById(ctx: QueryContext, securityId: string): Promise<QueryResponse<SecurityRow | null>> {
+export async function securityById(ctx: QueryContext, securityId: string): Promise<QueryResult<SecurityRow | null>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const { value, ms } = await measure(() => jsonGet<SecurityRow>(ctx.client, securityKey(securityId)));
@@ -85,7 +84,7 @@ export async function securityById(ctx: QueryContext, securityId: string): Promi
 export async function securityByNo(
   ctx: QueryContext,
   securityNo: string
-): Promise<QueryResponse<SecurityProjection[]>> {
+): Promise<QueryResult<SecurityProjection[]>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const query = tagEquals("security_no", securityNo);
@@ -107,7 +106,7 @@ export async function positionByComposite(
   accountId: string,
   securityNo: string,
   acctTypeCode: string
-): Promise<QueryResponse<PositionRow | null>> {
+): Promise<QueryResult<PositionRow | null>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const key = positionKey(accountId, securityNo, acctTypeCode);
@@ -119,7 +118,7 @@ export async function positionByComposite(
 export async function positionsByAccount(
   ctx: QueryContext,
   accountId: string
-): Promise<QueryResponse<PositionProjection[]>> {
+): Promise<QueryResult<PositionProjection[]>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const query = tagEquals("account_id", accountId);
@@ -142,7 +141,7 @@ export async function transactionById(
   securityNo: string,
   acctTypeCode: string,
   transactionId: string
-): Promise<QueryResponse<TransactionRow | null>> {
+): Promise<QueryResult<TransactionRow | null>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const key = transactionKey(accountId, securityNo, acctTypeCode, transactionId);
@@ -157,7 +156,7 @@ export async function transactionsByComposite(
   securityId: string,
   tradeDate: string,
   acctTypeCode: string
-): Promise<QueryResponse<TransactionProjection[]>> {
+): Promise<QueryResult<TransactionProjection[]>> {
   const tradeDateEpoch = Date.parse(`${tradeDate}T00:00:00.000Z`);
   if (!Number.isFinite(tradeDateEpoch)) {
     throw new Error("tradeDate must use YYYY-MM-DD format");
@@ -174,7 +173,7 @@ export async function transactionsSearch(
     acctTypeCode?: string;
     limit?: number;
   }
-): Promise<QueryResponse<TransactionProjection[]>> {
+): Promise<QueryResult<TransactionProjection[]>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
   const clauses = [
@@ -204,112 +203,80 @@ export async function transactionsSearch(
   ]);
 }
 
-export async function accountPortfolioJoin(ctx: QueryContext, accountId: string): Promise<QueryResponse<unknown>> {
+export async function accountPortfolioJoin(ctx: QueryContext, accountId: string): Promise<QueryResult<unknown>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
-  const base = await measure(() =>
-    Promise.all([
-      jsonGet<AccountRow>(ctx.client, accountKey(accountId)),
-      positionsByAccount({ ...ctx, startedAt }, accountId)
-    ])
+  const key = snapshotKey(accountId);
+  type Projection = Pick<AccountSnapshot, "account" | "position_count" | "positions">;
+  const projected = await measure(() =>
+    jsonGetFields<Projection>(ctx.client, key, ["account", "position_count", "positions"])
   );
-  const [account, positions] = base.value;
-  timing.search_ms = positions.timing.search_ms;
-  timing.hydrate_ms = positions.timing.hydrate_ms;
-
-  const join = await measure(async () => {
-    const securityIds = [...new Set(positions.data.map((position) => position.security_id))];
-    const securities = await jsonMGetFields<SecurityProjection>(
-      ctx.client,
-      securityIds.map(securityKey),
-      SECURITY_PROJECTION_FIELDS
+  timing.redis_ms = projected.ms;
+  if (projected.value && projected.value.positions.length !== projected.value.position_count) {
+    throw new Error(
+      `Account ${accountId} snapshot position_count ${projected.value.position_count} does not match positions length ${projected.value.positions.length}`
     );
-    const byId = new Map(
-      securities
-        .filter((row): row is SecurityProjection => Boolean(row))
-        .map((row) => [row.security_id, row])
-    );
-    return {
-      account,
-      positions: positions.data.map((position) => ({
-        ...position,
-        security: byId.get(position.security_id)
-      }))
-    };
-  });
-
-  timing.join_ms = join.ms;
-  timing.redis_ms = roundMs(base.ms + join.ms);
-  const securityCount = new Set(positions.data.map((position) => position.security_id)).size;
+  }
+  const data = projected.value
+    ? { account: projected.value.account, positions: projected.value.positions }
+    : null;
   return response(
     startedAt,
-    join.value,
+    data,
     timing,
-    positions.result_count,
-    1 + positions.redis_command_count + securityCount,
-    [
-      `JSON.GET ${accountKey(accountId)} $`,
-      `FT.SEARCH ${INDEXES.positions} "${tagEquals("account_id", accountId)}" RETURN <projected-fields> LIMIT 0 500 DIALECT 2`,
-      "JSON.GET sec:<security-id>:info <projected-fields> (pipelined)"
-    ]
+    data?.positions.length ?? 0,
+    1,
+    [`JSON.GET ${key} $.account $.position_count $.positions`]
   );
 }
 
-export async function accountActivityJoin(ctx: QueryContext, accountId: string): Promise<QueryResponse<unknown>> {
+export async function accountActivityJoin(ctx: QueryContext, accountId: string): Promise<QueryResult<unknown>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
-  const base = await measure(() =>
-    Promise.all([
-      jsonGet<AccountRow>(ctx.client, accountKey(accountId)),
-      transactionsSearch({ ...ctx, startedAt }, { accountId, limit: 100 })
-    ])
+  const key = snapshotKey(accountId);
+  type Projection = Pick<AccountSnapshot, "account" | "recent_transactions">;
+  const projected = await measure(() =>
+    jsonGetFields<Projection>(ctx.client, key, ["account", "recent_transactions"])
   );
-  const [account, transactions] = base.value;
-  timing.search_ms = transactions.timing.search_ms;
-  timing.hydrate_ms = transactions.timing.hydrate_ms;
-
-  const join = await measure(async () => {
-    const securityIds = [...new Set(transactions.data.map((transaction) => transaction.security_id))];
-    const securities = await jsonMGetFields<SecurityProjection>(
-      ctx.client,
-      securityIds.map(securityKey),
-      SECURITY_PROJECTION_FIELDS
-    );
-    const byId = new Map(
-      securities
-        .filter((row): row is SecurityProjection => Boolean(row))
-        .map((row) => [row.security_id, row])
-    );
-    return {
-      account,
-      transactions: transactions.data.map((transaction) => ({
-        ...transaction,
-        security: byId.get(transaction.security_id)
-      }))
-    };
-  });
-
-  timing.join_ms = join.ms;
-  timing.redis_ms = roundMs(base.ms + join.ms);
-  const securityCount = new Set(transactions.data.map((transaction) => transaction.security_id)).size;
+  timing.redis_ms = projected.ms;
+  const data = projected.value
+    ? {
+        account: projected.value.account,
+        transactions: projected.value.recent_transactions
+      }
+    : null;
   return response(
     startedAt,
-    join.value,
+    data,
     timing,
-    transactions.result_count,
-    1 + transactions.redis_command_count + securityCount,
-    [
-      `JSON.GET ${accountKey(accountId)} $`,
-      `FT.SEARCH ${INDEXES.transactions} "${tagEquals("account_id", accountId)}" RETURN <projected-fields> LIMIT 0 100 DIALECT 2`,
-      "JSON.GET sec:<security-id>:info <projected-fields> (pipelined)"
-    ]
+    data?.transactions.length ?? 0,
+    1,
+    [`JSON.GET ${key} $.account $.recent_transactions`]
   );
 }
 
-export async function accountSnapshot(ctx: QueryContext, accountId: string): Promise<QueryResponse<AccountSnapshot | null>> {
+export async function accountSnapshot(
+  ctx: QueryContext,
+  accountId: string
+): Promise<QueryResult<Omit<AccountSnapshot, "position_index"> | null>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
-  const { value, ms } = await measure(() => jsonGet<AccountSnapshot>(ctx.client, snapshotKey(accountId)));
+  type Projection = Omit<AccountSnapshot, "position_index">;
+  const fields = [
+    "_id",
+    "account_id",
+    "generated_at",
+    "revision",
+    "account",
+    "position_count",
+    "transaction_count",
+    "total_market_value",
+    "recent_transactions",
+    "positions"
+  ] as const satisfies readonly (keyof Projection)[];
+  const { value, ms } = await measure(() => jsonGetFields<Projection>(ctx.client, snapshotKey(accountId), fields));
   timing.redis_ms = ms;
-  return response(startedAt, value, timing, value ? 1 : 0, 1, [`JSON.GET ${snapshotKey(accountId)} $`]);
+  return response(startedAt, value, timing, value ? 1 : 0, 1, [
+    `JSON.GET ${snapshotKey(accountId)} <public-projection-fields>`
+  ]);
 }

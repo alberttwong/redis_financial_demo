@@ -43,19 +43,19 @@ The browser workbench at `/` calls `/api/query` with a `pattern` parameter. It s
 
 | Group | Pattern | Workbench label | Main inputs | Redis access pattern |
 | --- | --- | --- | --- | --- |
-| Primary | `accountById` | Account by ID | `account_id` | `JSON.GET acct:{account_id}:info $` |
-| Primary | `securityById` | Security by ID | `security_id` | `JSON.GET sec:{security_id}:info $` |
-| Secondary | `securityByNo` | Security by No | `security_no` | `FT.SEARCH idx:securities @security_no:{...}` then pipelined `JSON.GET` |
-| Primary | `positionByComposite` | Position composite | `account_id`, `security_no`, `acct_type_code` | `JSON.GET pos:{account_id}:{security_no}:{acct_type_code} $` |
-| Secondary | `positionsByAccount` | Positions by account | `account_id` | `FT.SEARCH idx:positions @account_id:{...} LIMIT 0 500` then pipelined `JSON.GET` |
-| Primary | `transactionById` | Transaction by ID | `account_id`, `security_no`, `acct_type_code`, `transaction_id` | `JSON.GET txn:{pos:account_id:security_no:acct_type_code}:{transaction_id} $` |
-| Secondary | `transactionsByComposite` | Transactions by composite | `account_id`, `security_id`, `trade_date`, `acct_type_code` | `FT.SEARCH idx:transactions` across the four indexed fields, then pipelined `JSON.GET` |
-| Secondary | `transactionsByAccount` | Transactions by account | `account_id`, `limit` | `FT.SEARCH idx:transactions @account_id:{...}` then pipelined `JSON.GET` |
-| Secondary | `transactionsBySecurity` | Transactions by security | `security_id`, `limit` | `FT.SEARCH idx:transactions @security_id:{...}` then pipelined `JSON.GET` |
-| Secondary | `transactionsByAccountSecurity` | Transactions by account + security | `account_id`, `security_id`, `limit` | `FT.SEARCH idx:transactions @account_id:{...} @security_id:{...}` then pipelined `JSON.GET` |
-| Join | `accountPortfolioJoin` | Account portfolio join | `account_id` | `JSON.GET` account, search positions by account, search securities by `security_no`, then assemble in the API |
-| Join | `accountActivityJoin` | Account activity join | `account_id` | `JSON.GET` account, search recent transactions by account, fetch securities by key, then assemble in the API |
-| Read model | `accountSnapshot` | Materialized account snapshot | `account_id` | `JSON.GET acct-snapshot:{account_id} $` |
+| Primary | `accountById` | Account by ID | `account_id` | `JSON.GET acct:{acct:<account_id>}:info $` |
+| Primary | `securityById` | Security by ID | `security_id` | `JSON.GET sec:<security_id>:info $` |
+| Secondary | `securityByNo` | Security by No | `security_no` | One projected `FT.SEARCH idx:securities @security_no:{...}` |
+| Primary | `positionByComposite` | Position composite | `account_id`, `security_no`, `acct_type_code` | `JSON.GET pos:{acct:<account_id>}:<security_no>:<acct_type_code> $` |
+| Secondary | `positionsByAccount` | Positions by account | `account_id` | One projected `FT.SEARCH idx:positions @account_id:{...} LIMIT 0 500` |
+| Primary | `transactionById` | Transaction by ID | `account_id`, `security_no`, `acct_type_code`, `transaction_id` | `JSON.GET txn:{acct:<account_id>}:<security_no>:<acct_type_code>:<transaction_id> $` |
+| Secondary | `transactionsByComposite` | Transactions by composite | `account_id`, `security_id`, `trade_date`, `acct_type_code` | One projected `FT.SEARCH idx:transactions` across the four indexed fields |
+| Secondary | `transactionsByAccount` | Transactions by account | `account_id`, `limit` | One projected `FT.SEARCH idx:transactions @account_id:{...}` |
+| Secondary | `transactionsBySecurity` | Transactions by security | `security_id`, `limit` | One projected `FT.SEARCH idx:transactions @security_id:{...}` |
+| Secondary | `transactionsByAccountSecurity` | Transactions by account + security | `account_id`, `security_id`, `limit` | One projected `FT.SEARCH idx:transactions @account_id:{...} @security_id:{...}` |
+| Join | `accountPortfolioJoin` | Account portfolio join | `account_id` | One projected `JSON.GET acct-snapshot:{acct:<account_id>} $.account $.positions` |
+| Join | `accountActivityJoin` | Account activity join | `account_id` | One projected `JSON.GET acct-snapshot:{acct:<account_id>} $.account $.recent_transactions` |
+| Read model | `accountSnapshot` | Materialized account snapshot | `account_id` | One projected `JSON.GET acct-snapshot:{acct:<account_id>} ...` |
 
 The API accepts:
 
@@ -67,7 +67,7 @@ Responses include `data`, `timing`, `result_count`, `payload_bytes`, and the Red
 
 ## Atomic Transaction Writes
 
-Runtime transaction inserts go through the `apply_transaction` Redis Function instead of calling `JSON.SET` directly. The function atomically rejects duplicate transaction keys, writes the transaction document, and applies the corresponding quantity change to the position with a partial RedisJSON update.
+Runtime transaction inserts go through the `apply_transaction` Redis Function instead of calling `JSON.SET` directly. The transaction, position, and account snapshot keys all share the account hash tag `{acct:<account_id>}`. One Function invocation atomically rejects duplicate transaction keys, writes the transaction document, applies the corresponding quantity change to the position, and updates the materialized account projection.
 
 Load the function library with:
 
@@ -94,15 +94,17 @@ curl -X POST http://localhost:3000/api/transactions \
 
 Quantity rules are `BUY = +quantity`, `SELL = -quantity`, and no quantity change for `DIVIDEND`, `INTEREST`, `TRANSFER`, or `FEE`. Reusing the same `transaction_id` for the same position identity returns `duplicate` without applying the quantity twice. Market value is deliberately not derived from trade amount; a pricing/revaluation process must refresh it.
 
-After the transaction/position Function completes, the runtime API calls `update_account_snapshot` against `acct-snapshot:{account_id}`. That Function atomically patches the embedded position, prepends the transaction to the retained recent-transaction window, updates counts and totals, and advances `generated_at`. Position projection versions prevent concurrent requests from overwriting a newer embedded position with an older result. If the snapshot is missing, the API builds it from the live account data and reapplies the idempotent incremental update.
+The API resolves the compact security projection before calling the Function. Within the same atomic invocation, the Function patches the embedded position, prepends the security-enriched transaction to the retained 200-row activity window, updates counts and totals, advances `generated_at`, and increments the snapshot `revision`. Duplicate transaction replays change neither the position nor the revision.
 
-The source transaction/position commit and the account-snapshot projection are two separate atomic operations because their keys intentionally occupy different Redis Cluster hash slots. A snapshot failure therefore cannot roll back an already-committed transaction, but replaying the request repairs the retained snapshot projection without applying the position quantity twice. The direct distributed `FCALL apply_transaction` benchmark measures only the source transaction/position projection; automatic snapshot maintenance is part of `POST /api/transactions`.
+Each snapshot stores an internal SHA-1-to-array-index map for its positions. The Function uses that map to fetch and patch one embedded position without decoding or scanning the complete snapshot on every write. Public query responses omit the internal map.
+
+An account snapshot must exist before runtime writes begin. If it is missing or malformed, `apply_transaction` fails before writing the source transaction or position. Run `npm run seed:snapshots` after historical base loading or whenever migrating the key schema. Because the source and projection are committed in the same account slot, the next portfolio or activity read sees the new quantity and transaction immediately; there is no asynchronous freshness window.
 
 On startup, the web workbench calls `/api/samples` to discover working seeded values for account, security, position, and transaction examples. This keeps secondary-index and composite-key examples from defaulting to IDs that do not exist in the current Redis Cloud dataset.
 
 ## Data Model
 
-The source system is SQL, so Redis stores one flat JSON document per logical SQL row. Base tables stay normalized; materialized snapshots are optional read models for hot account-level joins.
+The source system is SQL, so Redis stores one flat JSON document per logical SQL row. Base tables stay normalized; materialized snapshots serve hot account-level joins and are required before accepting atomic runtime transactions.
 
 ```mermaid
 erDiagram
@@ -169,8 +171,10 @@ erDiagram
     ACCOUNT_SNAPSHOTS {
         string account_id PK
         string generated_at
+        number revision
         json account
         json positions
+        json position_index
         json recent_transactions
         number position_count
         number transaction_count
@@ -182,11 +186,11 @@ Redis key mapping:
 
 | SQL-shaped table | Redis key pattern | Main access pattern |
 | --- | --- | --- |
-| `accounts` | `acct:{account_id}:info` | Direct `JSON.GET` by account id |
-| `securities` | `sec:{security_id}:info` | Direct lookup or search by `security_no` |
-| `positions` | `pos:{account_id}:{security_no}:{acct_type_code}` | Composite lookup or search by `account_id` |
-| `transactions` | `txn:{pos:account_id:security_no:acct_type_code}:{transaction_id}` | Direct lookup by transaction id, or search by `account_id`, `security_id`, or both |
-| `account_snapshots` | `acct-snapshot:{account_id}` | One-key hot read model for account join views |
+| `accounts` | `acct:{acct:<account_id>}:info` | Direct `JSON.GET` by account id; account-scoped hash slot |
+| `securities` | `sec:<security_id>:info` | Direct lookup or search by `security_no` |
+| `positions` | `pos:{acct:<account_id>}:<security_no>:<acct_type_code>` | Composite lookup or search by `account_id`; account-scoped hash slot |
+| `transactions` | `txn:{acct:<account_id>}:<security_no>:<acct_type_code>:<transaction_id>` | Direct lookup or search; account-scoped hash slot |
+| `account_snapshots` | `acct-snapshot:{acct:<account_id>}` | One-key hot read model in the same account-scoped hash slot |
 
 ## Data Flows
 
@@ -217,21 +221,21 @@ flowchart LR
 flowchart TD
     UI["Browser query workbench"]
     API["Next.js API route"]
-    KEY{"Known primary or composite key?"}
+    KEY{"Query path?"}
     GET["JSON.GET full row"]
     SEARCH["FT.SEARCH returns projected JSON fields"]
-    RELATED["Optional pipelined security JSON.GET"]
-    JOIN["Assemble optional join response in API"]
+    PROJECTION["JSON.GET current account projection fields"]
     TIMER["Attach timing: search, hydrate, join, total"]
 
     UI --> API --> KEY
-    KEY -- yes --> GET --> TIMER --> UI
-    KEY -- no --> SEARCH --> RELATED --> JOIN --> TIMER --> UI
+    KEY -- primary --> GET --> TIMER --> UI
+    KEY -- secondary --> SEARCH --> TIMER
+    KEY -- portfolio or activity --> PROJECTION --> TIMER
 ```
 
 ### Typical Stock Trading Change Flow
 
-Transaction rows are the change history. Position rows are the current or as-of holding state derived from transaction activity. The transaction key uses the complete position key as its Redis Cluster hash tag. Redis therefore hashes both keys from the same bytes and the Function can update an existing or newly-created position atomically in one slot.
+Transaction rows are the change history. Position rows are the current or as-of holding state derived from transaction activity. Account, position, transaction, and account-snapshot keys use the same `{acct:<account_id>}` Redis Cluster hash tag, allowing a single Function invocation to update the normalized source rows and read projection atomically.
 
 ```mermaid
 flowchart LR
@@ -239,26 +243,25 @@ flowchart LR
     FCALL["FCALL apply_transaction"]
     TXN["JSON.SET transaction if new"]
     POS["JSON.NUMINCRBY position quantity"]
-    SNAP["FCALL update_account_snapshot"]
-    READ["Account / portfolio read"]
+    SNAP["Patch account snapshot and revision"]
+    READ["One-command portfolio / activity read"]
 
     ORDER --> FCALL
     FCALL --> TXN
     FCALL --> POS
-    POS --> SNAP
-    TXN --> SNAP
+    FCALL --> SNAP
     SNAP --> READ
 ```
 
 ## Load Testing
 
-The full concurrent profile targets **230,000 client operations per second** across 12 HTTP query workloads and atomic transaction writes:
+The full concurrent profile targets **210,000 client operations per second**: 180,000 HTTP query requests/sec across 12 query workloads plus atomic transaction writes:
 
-- `accountPortfolioJoin` and `accountActivityJoin`: **50,000 reads/sec each**
-- The other 10 query patterns: **10,000 reads/sec each**
+- `accountPortfolioJoin` and `accountActivityJoin`: **45,000 reads/sec each**
+- The other 10 query patterns: **9,000 reads/sec each**
 - Trade writes: **30,000 writes/sec**
 
-The query tests call `/api/query`, so projected searches, related-security hydration, API-layer joins, and response serialization follow the same path as the web UI. Collection queries return compact fields directly from `FT.SEARCH`; joins use pipelined projected `JSON.GET` calls only for related securities. Primary-key point reads still return the complete row. Start the production-mode benchmark server before running a standalone query test:
+The query tests call `/api/query`, so projected searches, materialized join reads, admission control, and response serialization follow the same path as the web UI. Successful responses serialize `data` once, calculate `payload_bytes` from those exact UTF-8 bytes, and assemble the existing JSON envelope without asking `NextResponse.json` to traverse the large payload again. Collection queries return compact fields directly from one `FT.SEARCH`; both account join patterns return current projected fields from one `JSON.GET`. Primary-key point reads still return the complete row. Start the production-mode benchmark server before running a standalone query test:
 
 ```sh
 npm run bench:web
@@ -294,27 +297,51 @@ npm run bench:concurrent
 
 The newer `transactionsByComposite` UI pattern remains available in the workbench but is not part of this 12-query concurrent profile.
 
-Each query runner obtains a Redis-backed pool of valid seeded identifiers from `/api/samples?count=<n>` and selects a new pattern-appropriate sample for every request. Account reads spread across account IDs, security reads use valid securities, and composite position/transaction reads preserve correlated key fields. Persistent HTTP connections are reused, and each runner writes HTTP request rate, estimated Redis command rate, latency percentiles, errors, response throughput, random seed, sample-pool sizes, and the number of distinct keys actually exercised to `memtier-output/query-<pattern>.json`. `x-redis-command-count` reports how many Redis commands each successful HTTP request issued. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
+Each query runner obtains a Redis-backed pool of valid seeded identifiers from `/api/samples?count=<n>` and selects a new pattern-appropriate sample for every request. Account reads spread across account IDs, security reads use valid securities, and composite position/transaction reads preserve correlated key fields. Persistent HTTP connections are reused, and each runner writes HTTP request rate, estimated Redis command rate, latency percentiles, errors, response throughput, random seed, sample-pool sizes, and the number of distinct keys actually exercised to `memtier-output/query-<pattern>.json`. Every concurrent run also writes `concurrent-query-summary.json` and `concurrent-query-summary.md` with target/sec, achieved/sec, and p50/p95/p99 latency for each query. `x-redis-command-count` reports how many Redis commands each successful HTTP request issued. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
 
 Useful tuning knobs:
 
 ```text
 QUERY_BASE_URL=http://127.0.0.1:3000
-QUERY_DEFAULT_TARGET_RPS=10000
-QUERY_JOIN_TARGET_RPS=50000
+QUERY_DEFAULT_TARGET_RPS=9000
+QUERY_JOIN_TARGET_RPS=45000
 QUERY_TEST_TIME=60
-QUERY_MAX_IN_FLIGHT=2000
+QUERY_MAX_IN_FLIGHT=10000
+QUERY_REQUEST_TIMEOUT_MS=30000
+QUERY_SOCKET_TIMEOUT_MS=30000
+QUERY_DRAIN_TIMEOUT_MS=30000
 QUERY_SAMPLE_POOL_SIZE=1000
 QUERY_RANDOM_SEED=20260714
 ```
 
-The 230,000 client-op target is not equivalent to 230,000 Redis operations: collection searches now use one projected `FT.SEARCH`, but joins still issue one direct account read plus one search and one projected `JSON.GET` per distinct security. The benchmark summary reports both rates. Compare the estimated Redis operation target with the current Terraform throughput default of 180,000 operations/sec; an unchanged deployment may throttle or miss the requested rates.
+At the current implementation, 180,000 successful HTTP query requests/sec produce approximately 180,000 top-level Redis query commands/sec because every one of the 12 patterns uses one `JSON.GET` or one projected `FT.SEARCH`. The 30,000 write target adds 30,000 top-level `FCALL` commands/sec. The combined target is therefore approximately 210,000 client-visible Redis commands/sec before accounting for internal RedisJSON work performed by each Function. The repository now requests 300,000 operations/sec as a calibration floor, but Redis Cloud metrics from the isolated staircase tests are still required to confirm the final capacity because payload size and server-side work can make equal command counts consume very different resources.
+
+Run a single pattern against its isolated API pool as a staircase before enabling autoscaling. Set `QUERY_STAIRCASE_TARGET_COUNT=1` for a direct target URL or to the active target count when the URL fronts a pool:
+
+```sh
+QUERY_STAIRCASE_PATTERN=accountPortfolioJoin \
+QUERY_STAIRCASE_RATES=1000,2000,4000,8000,12000 \
+npm run bench:query:staircase
+```
+
+The harness stops at the first p95, error-rate, scheduler-drop, or achieved-rate failure and writes JSON and Markdown summaries. Set `QUERY_STAIRCASE_TARGET_COUNT` when the URL fronts multiple targets; the summary reports both aggregate and per-target validated capacity before calculating the headroom-adjusted `ALBRequestCountPerTarget` value.
+
+Run the complete heavyweight suite—positions, both transaction collections, portfolio, activity, and snapshot—with:
+
+```sh
+QUERY_STAIRCASE_RATES=250,500,1000,2000,4000 \
+QUERY_STAIRCASE_TARGET_COUNTS_JSON='{"positionsByAccount":4,"transactionsByAccount":8,"transactionsBySecurity":8,"accountPortfolioJoin":16,"accountActivityJoin":16,"accountSnapshot":4}' \
+npm run bench:query:staircase:heavy
+```
+
+Each pattern keeps its existing payload and writes an individual staircase plus `heavy-staircase-summary.json` and Markdown rollup.
 
 ### AWS us-west-2 Runner
 
 For a cleaner Redis Cloud benchmark, run the query app and load generators from AWS `us-west-2` near the database instead of from a laptop:
 
 ```sh
+npm run bench:aws-bundle
 cd infra/aws-load-runner
 terraform init
 terraform apply \
@@ -329,7 +356,11 @@ Then run the benchmark from the repo root:
 AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem npm run bench:aws-runner
 ```
 
-The default stack creates 16 one-process `c7i.large` API workers and four dedicated `c7i.large` generator hosts across the default VPC's availability zones. An internal Application Load Balancer routes generator traffic to the API tier. Each API worker starts with `API_REDIS_POOL_SIZE=16`, for at most 256 persistent application connections. Set `QUERY_GENERATOR_MODE=distributed` to run one synchronized `accountById` process per generator host; the aggregate rate and socket limits are divided across hosts and their latency histograms are merged afterward. The single-host and single-host multi-process modes remain available for direct comparisons.
+Build the bundle only after `.env.local` contains the live Redis endpoint. Terraform uploads it before creating API launch templates and Auto Scaling Groups. Arm `scripts/benchmark-teardown-watchdog.sh` before provisioning so a detached TTL cleanup remains available if the controlling session is interrupted; the AWS runner README lists the required environment variables.
+
+The default stack creates six independently scalable API pools—`light`, `positions`, `transactions`, `portfolio`, `activity`, and `snapshot`—with 64 desired `c7i.large` targets and nine dedicated generators. The split is 16 light, 4 positions, 8 transactions, 16 portfolio, 16 activity, and 4 snapshot targets. Every pool has its own Auto Scaling Group, least-outstanding-request ALB target group, Redis connection budget, and hard concurrency limit. Per-pattern values are soft reservations: a pattern may borrow otherwise-idle slots until its pool reaches the hard ceiling. Scale-out instances bootstrap from the private encrypted bundle Terraform uploads before launch. ALB request-count autoscaling is available through `enable_api_autoscaling`, but remains disabled until isolated staircase tests establish safe requests-per-target thresholds.
+
+The load generator now enforces a true wall-clock request deadline, including time waiting for an HTTP socket, and separately reports socket queue, connection setup, and time-to-first-byte percentiles. Successful wire bytes, error-response bytes, and the API's `x-query-payload-bytes` value are also recorded separately. Set `QUERY_ACCEPT_ENCODING=gzip` only when compressed responses match production client behavior.
 
 Run the isolated randomized point-read scale gate with:
 
@@ -338,12 +369,21 @@ AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem \
 AWS_LOAD_RUNNER_BENCHMARK=accountById \
 QUERY_GENERATOR_MODE=distributed \
 QUERY_DEFAULT_TARGET_RPS=10000 \
+QUERY_WARMUP_TIME=15 \
 QUERY_MAX_IN_FLIGHT=10000 \
 QUERY_SAMPLE_POOL_SIZE=1000 \
   npm run bench:aws-runner
 ```
 
-Use `AWS_LOAD_RUNNER_BENCHMARK=concurrent` (the default) for the complete 12-query plus trade-write profile. Terraform prints `web_url` for the ad hoc query site when `web_ingress_cidr_blocks` allows browser access and `generator_query_url` for the private load-balanced route.
+`QUERY_WARMUP_TIME` primes HTTP keep-alive and Redis connection pools before the measured window. Warm-up requests drain before measurement and remain separate in each shard artifact.
+
+The runner defaults to `AWS_LOAD_RUNNER_REUSE_HOSTS=1` because a newly provisioned API fleet already installed the exact Terraform-managed bundle. Generator source is always synchronized and its dependencies are installed in parallel, because generator instances do not consume the API bootstrap bundle. Set reuse to `0` only when deliberately rebuilding the API fleet after local code changes.
+
+`QUERY_GENERATOR_MODE=distributed` also spreads the complete concurrent profile across all generator hosts. By default, `TRADE_GENERATOR_COUNT=2` reserves the final two hosts for disjoint trade-write shards. The other seven hosts isolate the five heavyweight pools and split the six measured light queries across two generators. The aggregate trade target, maximum in-flight limit, and 1,000-account sample pool are divided across the two writers, while every process shares one epoch-time start barrier.
+
+Use `AWS_LOAD_RUNNER_BENCHMARK=concurrent` (the default) for the complete 12-query plus trade-write profile. Terraform prints the API Auto Scaling Group and target-group maps plus `generator_query_url` for the private load-balanced route.
+
+Set `LOAD_TEST_OUTPUT_DIR=memtier-output/<run-id>` to preserve a concurrent run's JSON results and logs without overwriting earlier variants.
 
 ## Initial Load Profile
 
@@ -409,7 +449,7 @@ Account rows are compact metadata documents without synthetic payloads. Larger p
 
 ## Trade Write Load Testing
 
-The default trade-write workload emits `FCALL apply_transaction` commands with unique transaction keys. At startup it samples existing positions from Redis Query Engine, then selects a position for every operation. Each transaction key retains the chosen position key as its Redis hash tag, preserving atomic transaction-position updates while distributing aggregate writes across many cluster slots.
+The default trade-write workload emits `FCALL apply_transaction` commands with unique transaction keys. At startup it randomizes the seeded account pool, fetches one projected position per sampled account in parallel, and loads the matching security and snapshot projections before measurement. Each call sends the transaction, position, and account-snapshot keys with the shared `{acct:<account_id>}` hash tag, preserving atomic source-plus-projection updates while distributing aggregate writes across account slots.
 
 ```sh
 npm run bench:trade-writes
@@ -421,11 +461,13 @@ Useful tuning knobs:
 MEMTIER_TRADE_TARGET_RPS=30000
 TRADE_MAX_IN_FLIGHT=10000
 TRADE_SAMPLE_POOL_SIZE=1000
+TRADE_ACCOUNT_DISCOVERY_POOL_SIZE=5000
+TRADE_BOOTSTRAP_CONCURRENCY=50
 TRADE_RANDOM_SEED=20260714
 MEMTIER_TRADE_PAYLOAD_BYTES=1024
 ```
 
-The distributed writer uses the same multiplexed Redis connection pool as the application and records offered, achieved, dropped, duplicate, error, and latency metrics in `memtier-output/trade-writes.json`. It intentionally exercises `apply_transaction` directly and does not refresh the separate account snapshot read model.
+The distributed writer uses the same multiplexed Redis connection pool as the application and records offered, achieved, dropped, duplicate, error, and latency metrics in `memtier-output/trade-writes.json`. In distributed AWS concurrent mode, `TRADE_GENERATOR_COUNT=2` splits the aggregate target and in-flight budget across two dedicated hosts. Both discover the complete account population, select deterministic disjoint account partitions, and produce `trade-writes-aggregate.json`. The workload exercises the complete atomic write path, including account-snapshot maintenance.
 
 The former single-position memtier workload remains available as an explicit hot-slot diagnostic:
 
@@ -433,7 +475,7 @@ The former single-position memtier workload remains available as an explicit hot
 npm run bench:trade-writes:hot-slot
 ```
 
-That diagnostic requires `memtier_benchmark` and intentionally directs every operation to `pos:A00000001:SPX000001:LOAD`.
+That diagnostic requires `memtier_benchmark` and intentionally directs every operation to `pos:{acct:A00000001}:SPX000001:LOAD` and its account snapshot.
 
 ## Redis Cloud
 
@@ -441,7 +483,7 @@ Terraform for Redis Cloud lives in `infra/redis-cloud`. Run it through `./terraf
 
 Use the Terraform `redis_url`, `redis_tls`, `redis_host`, `redis_port`, and `redis_password` outputs to build the ignored local `.env.local`. `redis_url` and `redis_password` are sensitive outputs; write them to the file rather than printing them in shared logs.
 
-The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 20 GB dataset size, and throughput sizing set to 180,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
+The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 20 GB dataset size, and throughput sizing set to 300,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
 
 Moving an existing Terraform-managed Essentials database to the default Pro/Flexible resource family is a replacement, not an in-place resize in this repo. Plan to export or reseed data when applying that change.
 
@@ -456,12 +498,12 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Initial load generates 5,000 accounts and 3,000 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
 - With the default initial-load profile, 5,000 accounts produces 1,500,000 positions, 10,000,000 random transactions across the account population, and 5,000 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
 - In a typical stock trading scenario, `transactions` are the incoming change/history records and `positions` are derived current or as-of holdings.
-- Runtime joins happen in the API layer. Redis Query Engine returns collection projection fields directly in one `FT.SEARCH`; pipelined projected `JSON.GET` commands hydrate related securities across Redis Cluster slots. The account read and collection search start concurrently, and security joins use direct `security_id` keys rather than per-row secondary searches.
+- Runtime secondary queries return projection fields directly in one `FT.SEARCH`. Portfolio and activity joins read prejoined account snapshot fields in one `JSON.GET`; the API only maps the stored activity field to the public `transactions` response name.
 - Redis is not used as a relational SQL join planner.
-- Hot account-level join reads should use materialized Redis JSON read models such as `acct-snapshot:{account_id}`.
-- The full concurrent load-test target is 230,000 client operations per second: two joins at 50,000 HTTP requests/sec each, ten other queries at 10,000 HTTP requests/sec each, and 30,000 atomic trade writes/sec. Reported Redis command rates are higher for multi-command query patterns.
-- Runtime writes and the trade-write load test call the atomic `apply_transaction` Redis Function; raw `JSON.SET` is reserved for historical batch loading.
-- The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 180,000 operations per second using the Redis Cloud account's default payment method.
+- Hot account-level join reads use materialized Redis JSON read models such as `acct-snapshot:{acct:<account_id>}`.
+- The full concurrent load-test target is 210,000 client operations per second: two joins at 45,000 HTTP requests/sec each, ten other queries at 9,000 HTTP requests/sec each, and 30,000 atomic trade writes/sec. The HTTP query portion totals 180,000 requests/sec and currently issues one top-level Redis command per request.
+- Runtime writes and the trade-write load test call one atomic `apply_transaction` Redis Function that updates the source transaction, current position, and account snapshot. Raw `JSON.SET` is reserved for historical batch loading and snapshot rebuilds.
+- The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 300,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.
 - Use the Terraform `redis_tls` output rather than assuming TLS mode; Pro/Flexible and Essentials deployments can differ.
 - Local `.env.local`, Terraform state, generated plan files, `.next`, `node_modules`, and benchmark outputs are intentionally ignored by git.

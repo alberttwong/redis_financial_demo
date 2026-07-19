@@ -1,51 +1,31 @@
-output "instance_id" {
-  description = "Legacy alias for the query API instance ID."
-  value       = aws_instance.api[0].id
+output "api_autoscaling_group_names" {
+  description = "Auto Scaling Group name for each cost-isolated API pool."
+  value       = { for pool, group in aws_autoscaling_group.api : pool => group.name }
 }
 
-output "public_ip" {
-  description = "Legacy alias for the query API public IP."
-  value       = aws_instance.api[0].public_ip
+output "api_target_group_arns" {
+  description = "ALB target group ARN for each cost-isolated API pool."
+  value       = { for pool, group in aws_lb_target_group.api : pool => group.arn }
 }
 
-output "public_dns" {
-  description = "Legacy alias for the query API public DNS name."
-  value       = aws_instance.api[0].public_dns
+output "api_pool_capacity" {
+  description = "Configured min, desired, max, Redis pool, concurrency, and request-target values for each API pool."
+  value       = var.api_pool_capacity
 }
 
-output "api_instance_id" {
-  description = "Legacy alias for the first query API instance ID."
-  value       = aws_instance.api[0].id
+output "deployment_bundle_bucket" {
+  description = "Private encrypted S3 bucket used to bootstrap API scale-out instances."
+  value       = aws_s3_bucket.deployment.id
 }
 
-output "api_public_ip" {
-  description = "Legacy alias for the first query API public IP."
-  value       = aws_instance.api[0].public_ip
+output "deployment_bundle_key" {
+  description = "S3 object key expected by API scale-out instances."
+  value       = var.deployment_bundle_key
 }
 
-output "api_public_dns" {
-  description = "Legacy alias for the first query API public DNS name."
-  value       = aws_instance.api[0].public_dns
-}
-
-output "api_private_ip" {
-  description = "Legacy alias for the first query API private IP."
-  value       = aws_instance.api[0].private_ip
-}
-
-output "api_instance_ids" {
-  description = "EC2 instance IDs for all query API workers."
-  value       = aws_instance.api[*].id
-}
-
-output "api_public_dns_names" {
-  description = "Public DNS names used to sync and manage all query API workers."
-  value       = aws_instance.api[*].public_dns
-}
-
-output "api_private_ips" {
-  description = "Private IPs for all query API workers."
-  value       = aws_instance.api[*].private_ip
+output "deployment_bundle_etag" {
+  description = "ETag of the bootstrap bundle Terraform uploaded before creating API launch templates."
+  value       = aws_s3_object.deployment_bundle.etag
 }
 
 output "generator_instance_id" {
@@ -89,21 +69,20 @@ output "ssh_user" {
 }
 
 output "ready_check" {
-  description = "Commands to check bootstrap status on the benchmark hosts."
+  description = "Commands to check bootstrap status on benchmark hosts."
   value = {
-    api        = [for instance in aws_instance.api : "ssh ec2-user@${instance.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"]
-    generator  = "ssh ec2-user@${aws_instance.generator[0].public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"
-    generators = [for instance in aws_instance.generator : "ssh ec2-user@${instance.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"]
+    api_pools = {
+      for pool, group in aws_autoscaling_group.api : pool => "aws autoscaling describe-auto-scaling-groups --region ${var.aws_region} --auto-scaling-group-names ${group.name}"
+    }
+    generators = [
+      for instance in aws_instance.generator :
+      "ssh ec2-user@${instance.public_dns} 'test -f /opt/lpl-load-runner-ready && echo ready || tail -n 80 /var/log/cloud-init-output.log'"
+    ]
   }
 }
 
-output "web_url" {
-  description = "Ad hoc public query workbench URL when web_ingress_cidr_blocks allows access."
-  value       = "http://${aws_instance.api[0].public_dns}:${var.web_port}"
-}
-
 output "generator_query_url" {
-  description = "Private load-balanced query API URL used by the load-generator hosts."
+  description = "Private load-balanced query API URL used by load-generator hosts."
   value       = "http://${aws_lb.api.dns_name}:${var.web_port}"
 }
 
@@ -113,6 +92,11 @@ output "api_load_balancer_dns" {
 }
 
 output "api_target_group_arn" {
-  description = "Target group ARN used to inspect API worker health and load balancer metrics."
-  value       = aws_lb_target_group.api.arn
+  description = "Legacy alias for the light-query API target group ARN."
+  value       = aws_lb_target_group.api["light"].arn
+}
+
+output "light_api_target_group_arn" {
+  description = "Legacy alias for the light-query API target group ARN."
+  value       = aws_lb_target_group.api["light"].arn
 }

@@ -1,5 +1,22 @@
 locals {
   public_subnet_ids = sort(data.aws_subnets.default_public.ids)
+  api_subnet_ids    = var.subnet_id == null ? local.public_subnet_ids : [var.subnet_id]
+  api_pattern_pool = {
+    positionsByAccount     = "positions"
+    transactionsByAccount  = "transactions"
+    transactionsBySecurity = "transactions"
+    accountPortfolioJoin   = "portfolio"
+    accountActivityJoin    = "activity"
+    accountSnapshot        = "snapshot"
+  }
+  api_pattern_priorities = {
+    positionsByAccount     = 100
+    transactionsByAccount  = 101
+    transactionsBySecurity = 102
+    accountPortfolioJoin   = 103
+    accountActivityJoin    = 104
+    accountSnapshot        = 105
+  }
   tags = merge(
     {
       Project = "lpl-redis-demo"
@@ -40,6 +57,52 @@ data "aws_ami" "al2023" {
   }
 }
 
+resource "aws_s3_bucket" "deployment" {
+  bucket_prefix = "${var.name_prefix}-deploy-"
+  force_destroy = true
+  tags          = local.tags
+}
+
+resource "aws_s3_bucket_public_access_block" "deployment" {
+  bucket = aws_s3_bucket.deployment.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "deployment" {
+  bucket = aws_s3_bucket.deployment.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "deployment" {
+  bucket = aws_s3_bucket.deployment.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_object" "deployment_bundle" {
+  bucket                 = aws_s3_bucket.deployment.id
+  key                    = var.deployment_bundle_key
+  source                 = "${path.module}/${var.deployment_bundle_source}"
+  etag                   = filemd5("${path.module}/${var.deployment_bundle_source}")
+  server_side_encryption = "AES256"
+
+  depends_on = [
+    aws_s3_bucket_public_access_block.deployment,
+    aws_s3_bucket_server_side_encryption_configuration.deployment,
+    aws_s3_bucket_versioning.deployment,
+  ]
+}
+
 resource "aws_iam_role" "runner" {
   name = "${var.name_prefix}-role"
   tags = local.tags
@@ -63,6 +126,26 @@ resource "aws_iam_role_policy_attachment" "ssm" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
+resource "aws_iam_role_policy" "deployment_bundle" {
+  name = "${var.name_prefix}-deployment-bundle"
+  role = aws_iam_role.runner.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.deployment.arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.deployment.arn}/*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "runner" {
   name = "${var.name_prefix}-profile"
   role = aws_iam_role.runner.name
@@ -84,7 +167,7 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
   from_port         = 22
   ip_protocol       = "tcp"
   to_port           = 22
-  description       = "SSH access to the benchmark runner"
+  description       = "SSH access to benchmark hosts"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "web" {
@@ -95,7 +178,21 @@ resource "aws_vpc_security_group_ingress_rule" "web" {
   from_port         = var.web_port
   ip_protocol       = "tcp"
   to_port           = var.web_port
-  description       = "HTTP access to the ad hoc query workbench"
+  description       = "Optional direct HTTP access to API targets"
+}
+
+resource "aws_vpc_security_group_egress_rule" "all" {
+  security_group_id = aws_security_group.runner.id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  description       = "Outbound access for package installs, S3, and Redis Cloud"
+}
+
+resource "aws_security_group" "load_balancer" {
+  name        = "${var.name_prefix}-alb-sg"
+  description = "Internal load balancer access for the query API pools."
+  vpc_id      = data.aws_vpc.default.id
+  tags        = local.tags
 }
 
 resource "aws_vpc_security_group_ingress_rule" "web_from_generator" {
@@ -104,21 +201,7 @@ resource "aws_vpc_security_group_ingress_rule" "web_from_generator" {
   from_port                    = var.web_port
   ip_protocol                  = "tcp"
   to_port                      = var.web_port
-  description                  = "Private query API access from the load generator to the load balancer"
-}
-
-resource "aws_vpc_security_group_egress_rule" "all" {
-  security_group_id = aws_security_group.runner.id
-  cidr_ipv4         = "0.0.0.0/0"
-  ip_protocol       = "-1"
-  description       = "Outbound access for package installs and Redis Cloud"
-}
-
-resource "aws_security_group" "load_balancer" {
-  name        = "${var.name_prefix}-alb-sg"
-  description = "Internal load balancer access for the horizontally scaled query API."
-  vpc_id      = data.aws_vpc.default.id
-  tags        = local.tags
+  description                  = "Private query API access from load generators"
 }
 
 resource "aws_vpc_security_group_egress_rule" "load_balancer_to_api" {
@@ -127,7 +210,7 @@ resource "aws_vpc_security_group_egress_rule" "load_balancer_to_api" {
   from_port                    = var.web_port
   ip_protocol                  = "tcp"
   to_port                      = var.web_port
-  description                  = "Forward query traffic to API workers"
+  description                  = "Forward query traffic to API targets"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "web_from_load_balancer" {
@@ -139,45 +222,180 @@ resource "aws_vpc_security_group_ingress_rule" "web_from_load_balancer" {
   description                  = "Query traffic from the internal load balancer"
 }
 
-moved {
-  from = aws_instance.runner
-  to   = aws_instance.api[0]
+resource "aws_launch_template" "api" {
+  for_each = var.api_pool_capacity
+
+  name_prefix            = "${var.name_prefix}-${each.key}-"
+  image_id               = data.aws_ami.al2023.id
+  instance_type          = var.instance_type
+  key_name               = var.key_name
+  update_default_version = true
+  vpc_security_group_ids = [aws_security_group.runner.id]
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.runner.name
+  }
+
+  monitoring {
+    enabled = true
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+    ebs {
+      delete_on_termination = true
+      encrypted             = true
+      volume_size           = var.root_volume_size_gb
+      volume_type           = "gp3"
+    }
+  }
+
+  user_data = base64encode(templatefile("${path.module}/api-user-data.sh.tftpl", {
+    aws_region                   = var.aws_region
+    bundle_bucket                = aws_s3_bucket.deployment.id
+    bundle_key                   = var.deployment_bundle_key
+    api_pool                     = each.key
+    redis_pool_size              = each.value.redis_pool_size
+    web_port                     = var.web_port
+    max_concurrency_light        = var.api_pool_capacity["light"].max_concurrency
+    max_concurrency_positions    = var.api_pool_capacity["positions"].max_concurrency
+    max_concurrency_transactions = var.api_pool_capacity["transactions"].max_concurrency
+    max_concurrency_portfolio    = var.api_pool_capacity["portfolio"].max_concurrency
+    max_concurrency_activity     = var.api_pool_capacity["activity"].max_concurrency
+    max_concurrency_snapshot     = var.api_pool_capacity["snapshot"].max_concurrency
+  }))
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.tags, {
+      Name    = "${var.name_prefix}-api-${each.key}"
+      Role    = "redis-query-api-${each.key}"
+      ApiPool = each.key
+    })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags          = local.tags
+  }
+
+  tags = local.tags
+
+  depends_on = [aws_s3_object.deployment_bundle]
 }
 
-resource "aws_instance" "api" {
-  count                       = var.api_instance_count
-  ami                         = data.aws_ami.al2023.id
-  instance_type               = var.instance_type
-  subnet_id                   = coalesce(var.subnet_id, element(local.public_subnet_ids, count.index % length(local.public_subnet_ids)))
-  associate_public_ip_address = true
-  key_name                    = var.key_name
-  vpc_security_group_ids      = [aws_security_group.runner.id]
-  iam_instance_profile        = aws_iam_instance_profile.runner.name
-  monitoring                  = true
-  user_data_replace_on_change = true
-  user_data                   = file("${path.module}/user-data.sh")
+resource "aws_lb" "api" {
+  name               = substr("${var.name_prefix}-api", 0, 32)
+  internal           = true
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.load_balancer.id]
+  subnets            = local.public_subnet_ids
+  tags               = local.tags
+}
+
+resource "aws_lb_target_group" "api" {
+  for_each = var.api_pool_capacity
+
+  name                          = substr("${var.name_prefix}-${each.key}", 0, 32)
+  port                          = var.web_port
+  protocol                      = "HTTP"
+  vpc_id                        = data.aws_vpc.default.id
+  deregistration_delay          = 15
+  load_balancing_algorithm_type = "least_outstanding_requests"
   tags = merge(local.tags, {
-    Name = "${var.name_prefix}-api-${format("%02d", count.index + 1)}"
-    Role = "redis-query-api"
+    ApiPool = each.key
   })
 
-  root_block_device {
-    volume_size = var.root_volume_size_gb
-    volume_type = "gp3"
-    encrypted   = true
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    interval            = 10
+    matcher             = "200"
+    path                = "/api/health"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
   }
 }
 
-moved {
-  from = aws_instance.generator
-  to   = aws_instance.generator[0]
+resource "aws_autoscaling_group" "api" {
+  for_each = var.api_pool_capacity
+
+  name                = "${var.name_prefix}-api-${each.key}"
+  min_size            = each.value.min_size
+  desired_capacity    = each.value.desired_capacity
+  max_size            = each.value.max_size
+  vpc_zone_identifier = local.api_subnet_ids
+  target_group_arns   = [aws_lb_target_group.api[each.key].arn]
+  # The runner performs explicit application and target-group readiness checks.
+  # EC2 health prevents a missing or broken bundle from causing unbounded
+  # replacement churn while those bounded checks fail closed.
+  health_check_type         = "EC2"
+  health_check_grace_period = 900
+  wait_for_capacity_timeout = "25m"
+
+  launch_template {
+    id      = aws_launch_template.api[each.key].id
+    version = aws_launch_template.api[each.key].latest_version
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    preferences {
+      instance_warmup        = 900
+      min_healthy_percentage = 50
+    }
+    triggers = ["tag"]
+  }
+
+  dynamic "tag" {
+    for_each = merge(local.tags, {
+      Name    = "${var.name_prefix}-api-${each.key}"
+      Role    = "redis-query-api-${each.key}"
+      ApiPool = each.key
+    })
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_autoscaling_policy" "api_request_count" {
+  for_each = var.enable_api_autoscaling ? var.api_pool_capacity : {}
+
+  name                   = "${var.name_prefix}-${each.key}-request-count"
+  autoscaling_group_name = aws_autoscaling_group.api[each.key].name
+  policy_type            = "TargetTrackingScaling"
+
+  target_tracking_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label = join("/", [
+        aws_lb.api.arn_suffix,
+        aws_lb_target_group.api[each.key].arn_suffix
+      ])
+    }
+    target_value = each.value.request_count_target_per_minute
+  }
 }
 
 resource "aws_instance" "generator" {
   count                       = var.generator_instance_count
   ami                         = data.aws_ami.al2023.id
   instance_type               = var.generator_instance_type
-  subnet_id                   = coalesce(var.subnet_id, element(data.aws_subnets.default_public.ids, count.index % length(data.aws_subnets.default_public.ids)))
+  subnet_id                   = coalesce(var.subnet_id, element(local.public_subnet_ids, count.index % length(local.public_subnet_ids)))
   associate_public_ip_address = true
   key_name                    = var.key_name
   vpc_security_group_ids      = [aws_security_group.runner.id]
@@ -197,44 +415,6 @@ resource "aws_instance" "generator" {
   }
 }
 
-resource "aws_lb" "api" {
-  name               = "${var.name_prefix}-api"
-  internal           = true
-  load_balancer_type = "application"
-  security_groups    = [aws_security_group.load_balancer.id]
-  subnets            = local.public_subnet_ids
-  tags               = local.tags
-}
-
-resource "aws_lb_target_group" "api" {
-  name                          = "${var.name_prefix}-api"
-  port                          = var.web_port
-  protocol                      = "HTTP"
-  vpc_id                        = data.aws_vpc.default.id
-  deregistration_delay          = 15
-  load_balancing_algorithm_type = "round_robin"
-  tags                          = local.tags
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    interval            = 10
-    matcher             = "200"
-    path                = "/api/health"
-    port                = "traffic-port"
-    protocol            = "HTTP"
-    timeout             = 5
-  }
-}
-
-resource "aws_lb_target_group_attachment" "api" {
-  count            = var.api_instance_count
-  target_group_arn = aws_lb_target_group.api.arn
-  target_id        = aws_instance.api[count.index].id
-  port             = var.web_port
-}
-
 resource "aws_lb_listener" "api" {
   load_balancer_arn = aws_lb.api.arn
   port              = var.web_port
@@ -242,6 +422,25 @@ resource "aws_lb_listener" "api" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.api.arn
+    target_group_arn = aws_lb_target_group.api["light"].arn
+  }
+}
+
+resource "aws_lb_listener_rule" "api_pool" {
+  for_each = local.api_pattern_pool
+
+  listener_arn = aws_lb_listener.api.arn
+  priority     = local.api_pattern_priorities[each.key]
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.api[each.value].arn
+  }
+
+  condition {
+    query_string {
+      key   = "pattern"
+      value = each.key
+    }
   }
 }

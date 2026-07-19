@@ -12,8 +12,13 @@ import {
   transactionsByComposite,
   transactionsSearch
 } from "@/lib/queries";
+import { isQueryPattern } from "@/lib/benchmark-samples";
+import { queryConcurrency } from "@/lib/query-concurrency";
+import { serializeQueryResponse } from "@/lib/query-response";
+import { getApiWorkloadClass, queryWorkloadClass } from "@/lib/query-workloads";
 import { getRedisClient } from "@/lib/redis";
 
+export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: NextRequest) {
@@ -21,12 +26,74 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const pattern = params.get("pattern") ?? "accountById";
 
+  if (!isQueryPattern(pattern)) {
+    return NextResponse.json({ error: `Unknown pattern: ${pattern}`, pattern }, { status: 400 });
+  }
+
+  const queryClass = queryWorkloadClass(pattern);
+  const apiClass = getApiWorkloadClass();
+  const workloadHeaders = {
+    "cache-control": "no-store",
+    "x-api-workload-class": apiClass,
+    "x-query-workload-class": queryClass,
+    "x-query-workload-pool": queryClass
+  };
+
+  if (apiClass !== "mixed" && apiClass !== queryClass) {
+    return NextResponse.json(
+      {
+        error: `${pattern} is a ${queryClass} query and cannot run on a ${apiClass} API worker`,
+        pattern,
+        query_workload_class: queryClass,
+        api_workload_class: apiClass
+      },
+      { status: 503, headers: workloadHeaders }
+    );
+  }
+
+  const admission = queryConcurrency.acquire(pattern);
+  const admissionHeaders = {
+    ...workloadHeaders,
+    "x-query-concurrency-active": String(admission.poolActive),
+    "x-query-concurrency-limit": String(admission.poolLimit),
+    "x-query-pattern-concurrency-active": String(admission.patternActive),
+    "x-query-pattern-concurrency-limit": String(admission.patternReservation),
+    "x-query-pattern-concurrency-reservation": String(admission.patternReservation),
+    "x-query-pattern-concurrency-borrowed": String(admission.patternBorrowed)
+  };
+  if (!admission.accepted) {
+    return NextResponse.json(
+      {
+        error: `${queryClass} pool concurrency limit reached`,
+        pattern,
+        query_workload_class: queryClass,
+        rejected_by: admission.rejectedBy,
+        pool_active: admission.poolActive,
+        pool_limit: admission.poolLimit,
+        pattern_active: admission.patternActive,
+        pattern_reservation: admission.patternReservation,
+        pattern_borrowed: admission.patternBorrowed
+      },
+      {
+        status: 429,
+        headers: {
+          ...admissionHeaders,
+          "retry-after": "1"
+        }
+      }
+    );
+  }
+
   try {
     const client = await getRedisClient();
     const result = await runPattern(pattern, params, startedAt, client);
-    return NextResponse.json(result, {
+    const serialized = serializeQueryResponse(result);
+    return new Response(serialized.body, {
       headers: {
-        "x-query-payload-bytes": String(result.payload_bytes),
+        ...admissionHeaders,
+        "content-length": String(serialized.responseBytes),
+        "content-type": "application/json; charset=utf-8",
+        "x-query-payload-bytes": String(serialized.payloadBytes),
         "x-redis-command-count": String(result.redis_command_count)
       }
     });
@@ -36,8 +103,10 @@ export async function GET(request: NextRequest) {
         error: error instanceof Error ? error.message : "Unknown query error",
         pattern
       },
-      { status: 400 }
+      { status: 400, headers: admissionHeaders }
     );
+  } finally {
+    admission.release();
   }
 }
 

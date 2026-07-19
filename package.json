@@ -38,10 +38,13 @@
     "bench:query:account-portfolio-join": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountPortfolioJoin",
     "bench:query:account-activity-join": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountActivityJoin",
     "bench:query:account-snapshot": "node --env-file-if-exists=.env.local --import tsx scripts/load-query-pattern.ts accountSnapshot",
+    "bench:query:staircase": "node --import tsx scripts/bench-query-staircase.ts",
+    "bench:query:staircase:heavy": "node --env-file-if-exists=.env.local --import tsx scripts/bench-heavy-query-staircases.ts",
     "bench:local": "bash scripts/bench-local.sh",
     "bench:concurrent": "bash scripts/bench-concurrent.sh",
     "bench:web": "bash scripts/aws-load-runner-start-web.sh",
     "bench:aws-web": "bash scripts/aws-load-runner-start-web.sh",
+    "bench:aws-bundle": "bash scripts/build-aws-load-runner-bundle.sh",
     "bench:aws-runner": "bash scripts/aws-load-runner-run.sh"
   },
   "dependencies": {

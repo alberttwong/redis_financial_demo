@@ -36,10 +36,28 @@ type Counters = {
   requestErrors: number;
   dropped: number;
   responseBytes: number;
+  successfulResponseBytes: number;
+  successfulResponseBytesDuringWindow: number;
+  httpErrorResponseBytes: number;
+  apiPayloadBytes: number;
+  apiPayloadBytesDuringWindow: number;
   redisCommands: number;
   redisCommandsDuringWindow: number;
   inFlight: number;
   peakInFlight: number;
+};
+
+type LoadWindow = {
+  counters: Counters;
+  latencyHistogram: Uint32Array;
+  socketQueueHistogram: Uint32Array;
+  connectionSetupHistogram: Uint32Array;
+  timeToFirstByteHistogram: Uint32Array;
+  sampledKeys: Set<string>;
+  httpStatusCounts: Map<string, number>;
+  requestErrorCounts: Map<string, number>;
+  startedAt: number;
+  endsAt: number;
 };
 
 async function main() {
@@ -56,14 +74,17 @@ async function main() {
     "QUERY_TEST_TIME",
     readPositiveNumber("MEMTIER_TEST_TIME", 60)
   );
+  const warmupTimeSeconds = readNonNegativeNumber("QUERY_WARMUP_TIME", 0);
   const targetRps =
     profile.target === "join"
-      ? readPositiveNumber("QUERY_JOIN_TARGET_RPS", 50_000)
-      : readPositiveNumber("QUERY_DEFAULT_TARGET_RPS", 10_000);
+      ? readPositiveNumber("QUERY_JOIN_TARGET_RPS", 45_000)
+      : readPositiveNumber("QUERY_DEFAULT_TARGET_RPS", 9_000);
   const schedulerTickMs = readPositiveNumber("QUERY_SCHEDULER_TICK_MS", 10);
   const requestTimeoutMs = readPositiveNumber("QUERY_REQUEST_TIMEOUT_MS", 30_000);
+  const socketTimeoutMs = readPositiveNumber("QUERY_SOCKET_TIMEOUT_MS", requestTimeoutMs);
+  const acceptEncoding = process.env.QUERY_ACCEPT_ENCODING?.trim();
   const drainTimeoutMs = readPositiveNumber("QUERY_DRAIN_TIMEOUT_MS", 30_000);
-  const maxInFlight = readPositiveNumber("QUERY_MAX_IN_FLIGHT", 2_000);
+  const maxInFlight = readPositiveNumber("QUERY_MAX_IN_FLIGHT", 10_000);
 
   const samplePoolSize = readPositiveNumber("QUERY_SAMPLE_POOL_SIZE", 1_000);
   const samplePool = await loadSamplePool(baseUrl, samplePoolSize);
@@ -77,123 +98,181 @@ async function main() {
     maxSockets: readPositiveNumber("QUERY_MAX_SOCKETS", maxInFlight),
     maxFreeSockets: readPositiveNumber("QUERY_MAX_FREE_SOCKETS", Math.min(maxInFlight, 256))
   });
-  const counters: Counters = {
-    started: 0,
-    completed: 0,
-    succeeded: 0,
-    succeededDuringWindow: 0,
-    httpErrors: 0,
-    requestErrors: 0,
-    dropped: 0,
-    responseBytes: 0,
-    redisCommands: 0,
-    redisCommandsDuringWindow: 0,
-    inFlight: 0,
-    peakInFlight: 0
-  };
-  const latencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
-  const durationMs = testTimeSeconds * 1000;
-  const targetRequests = Math.floor(targetRps * testTimeSeconds);
-  const startedAt = performance.now();
-  const measurementEndsAt = startedAt + durationMs;
-  let handledSlots = 0;
-  const sampledKeys = new Set<string>();
-  const httpStatusCounts = new Map<string, number>();
-  const requestErrorCounts = new Map<string, number>();
+  let totalInFlight = 0;
 
   console.log(
-    `${pattern}: target=${targetRps} requests/sec duration=${testTimeSeconds}s max_in_flight=${maxInFlight}`
+    `${pattern}: target=${targetRps} requests/sec warmup=${warmupTimeSeconds}s duration=${testTimeSeconds}s max_in_flight=${maxInFlight}`
   );
 
-  await new Promise<void>((resolve) => {
-    const startRequest = () => {
-      const sample = selectQuerySample(samplePool, pattern, random);
-      sampledKeys.add(sampleIdentity(pattern, sample));
-      const queryUrl = makeQueryUrl(baseUrl, pattern, sample);
-      counters.started += 1;
-      counters.inFlight += 1;
-      counters.peakInFlight = Math.max(counters.peakInFlight, counters.inFlight);
-      const requestStartedAt = performance.now();
-      let finished = false;
+  const runWindow = async (durationSeconds: number): Promise<LoadWindow> => {
+    const counters = createCounters();
+    const latencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+    const socketQueueHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+    const connectionSetupHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+    const timeToFirstByteHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+    const sampledKeys = new Set<string>();
+    const httpStatusCounts = new Map<string, number>();
+    const requestErrorCounts = new Map<string, number>();
+    const durationMs = durationSeconds * 1000;
+    const targetRequests = Math.floor(targetRps * durationSeconds);
+    const startedAt = performance.now();
+    const endsAt = startedAt + durationMs;
+    let handledSlots = 0;
 
-      const finish = (statusCode?: number, bytes = 0, redisCommands = 0, requestError?: unknown) => {
-        if (finished) return;
-        finished = true;
-        counters.inFlight -= 1;
-        counters.completed += 1;
-        counters.responseBytes += bytes;
-        if (statusCode !== undefined) incrementCount(httpStatusCounts, String(statusCode));
-        if (requestError !== undefined) {
-          counters.requestErrors += 1;
-          incrementCount(requestErrorCounts, requestErrorName(requestError));
-        }
-        else if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
-          counters.succeeded += 1;
-          counters.redisCommands += redisCommands;
-          if (performance.now() <= measurementEndsAt) {
-            counters.succeededDuringWindow += 1;
-            counters.redisCommandsDuringWindow += redisCommands;
+    await new Promise<void>((resolve) => {
+      const startRequest = () => {
+        const sample = selectQuerySample(samplePool, pattern, random);
+        sampledKeys.add(sampleIdentity(pattern, sample));
+        const queryUrl = makeQueryUrl(baseUrl, pattern, sample);
+        counters.started += 1;
+        counters.inFlight += 1;
+        totalInFlight += 1;
+        counters.peakInFlight = Math.max(counters.peakInFlight, counters.inFlight);
+        const requestStartedAt = performance.now();
+        let finished = false;
+        let deadlineTimer: NodeJS.Timeout | undefined;
+
+        const finish = (
+          statusCode?: number,
+          bytes = 0,
+          redisCommands = 0,
+          apiPayloadBytes = 0,
+          requestError?: unknown
+        ) => {
+          if (finished) return;
+          finished = true;
+          if (deadlineTimer) clearTimeout(deadlineTimer);
+          const completedAt = performance.now();
+          counters.inFlight -= 1;
+          totalInFlight -= 1;
+          counters.completed += 1;
+          counters.responseBytes += bytes;
+          if (statusCode !== undefined) incrementCount(httpStatusCounts, String(statusCode));
+          if (requestError !== undefined) {
+            counters.requestErrors += 1;
+            incrementCount(requestErrorCounts, requestErrorName(requestError));
+          } else if (statusCode !== undefined && statusCode >= 200 && statusCode < 300) {
+            counters.succeeded += 1;
+            counters.successfulResponseBytes += bytes;
+            counters.apiPayloadBytes += apiPayloadBytes;
+            counters.redisCommands += redisCommands;
+            if (completedAt <= endsAt) {
+              counters.succeededDuringWindow += 1;
+              counters.successfulResponseBytesDuringWindow += bytes;
+              counters.apiPayloadBytesDuringWindow += apiPayloadBytes;
+              counters.redisCommandsDuringWindow += redisCommands;
+            }
+          } else {
+            counters.httpErrors += 1;
+            counters.httpErrorResponseBytes += bytes;
           }
-        }
-        else counters.httpErrors += 1;
-        recordLatency(latencyHistogram, performance.now() - requestStartedAt);
+          recordLatency(latencyHistogram, completedAt - requestStartedAt);
+        };
+
+        const request = transport.request(
+          queryUrl,
+          {
+            agent,
+            headers: {
+              accept: "application/json",
+              "cache-control": "no-store",
+              ...(acceptEncoding ? { "accept-encoding": acceptEncoding } : {})
+            },
+            method: "GET"
+          },
+          (response) => {
+            let bytes = 0;
+            recordLatency(timeToFirstByteHistogram, performance.now() - requestStartedAt);
+            const redisCommands = positiveHeaderNumber(response.headers["x-redis-command-count"]);
+            const apiPayloadBytes = nonNegativeHeaderNumber(response.headers["x-query-payload-bytes"]);
+            response.on("data", (chunk: Buffer) => {
+              bytes += chunk.length;
+            });
+            response.on("end", () => finish(response.statusCode, bytes, redisCommands, apiPayloadBytes));
+            response.on("error", (error) =>
+              finish(response.statusCode, bytes, redisCommands, apiPayloadBytes, error)
+            );
+          }
+        );
+        request.once("socket", (socket) => {
+          const socketAssignedAt = performance.now();
+          recordLatency(socketQueueHistogram, socketAssignedAt - requestStartedAt);
+          if (socket.connecting) {
+            socket.once("connect", () =>
+              recordLatency(connectionSetupHistogram, performance.now() - socketAssignedAt)
+            );
+          } else {
+            recordLatency(connectionSetupHistogram, 0);
+          }
+        });
+        deadlineTimer = setTimeout(
+          () => request.destroy(new Error("wall clock request timeout")),
+          requestTimeoutMs
+        );
+        request.setTimeout(socketTimeoutMs, () => request.destroy(new Error("socket inactivity timeout")));
+        request.on("error", (error) => finish(undefined, 0, 0, 0, error));
+        request.end();
       };
 
-      const request = transport.request(
-        queryUrl,
-        {
-          agent,
-          headers: {
-            accept: "application/json",
-            "cache-control": "no-store"
-          },
-          method: "GET"
-        },
-        (response) => {
-          let bytes = 0;
-          const redisCommands = positiveHeaderNumber(response.headers["x-redis-command-count"]);
-          response.on("data", (chunk: Buffer) => {
-            bytes += chunk.length;
-          });
-          response.on("end", () => finish(response.statusCode, bytes, redisCommands));
-          response.on("error", (error) => finish(response.statusCode, bytes, redisCommands, error));
+      const pump = () => {
+        const elapsedMs = Math.min(performance.now() - startedAt, durationMs);
+        const expectedSlots = Math.min(targetRequests, Math.floor((elapsedMs * targetRps) / 1000));
+        const due = expectedSlots - handledSlots;
+        handledSlots = expectedSlots;
+
+        const launchCount = Math.min(due, Math.max(0, maxInFlight - totalInFlight));
+        counters.dropped += due - launchCount;
+        for (let index = 0; index < launchCount; index += 1) {
+          startRequest();
         }
-      );
-      request.setTimeout(requestTimeoutMs, () => request.destroy(new Error("request timeout")));
-      request.on("error", (error) => finish(undefined, 0, 0, error));
-      request.end();
+
+        if (elapsedMs >= durationMs) {
+          clearInterval(timer);
+          resolve();
+        }
+      };
+
+      const timer = setInterval(pump, schedulerTickMs);
+      pump();
+    });
+
+    return {
+      counters,
+      latencyHistogram,
+      socketQueueHistogram,
+      connectionSetupHistogram,
+      timeToFirstByteHistogram,
+      sampledKeys,
+      httpStatusCounts,
+      requestErrorCounts,
+      startedAt,
+      endsAt
     };
+  };
 
-    const pump = () => {
-      const elapsedMs = Math.min(performance.now() - startedAt, durationMs);
-      const expectedSlots = Math.min(targetRequests, Math.floor((elapsedMs * targetRps) / 1000));
-      const due = expectedSlots - handledSlots;
-      handledSlots = expectedSlots;
-
-      const launchCount = Math.min(due, Math.max(0, maxInFlight - counters.inFlight));
-      counters.dropped += due - launchCount;
-      for (let index = 0; index < launchCount; index += 1) {
-        startRequest();
-      }
-
-      if (elapsedMs >= durationMs) {
-        clearInterval(timer);
-        resolve();
-      }
-    };
-
-    const timer = setInterval(pump, schedulerTickMs);
-    pump();
-  });
-
-  const drainStartedAt = performance.now();
-  while (counters.inFlight > 0 && performance.now() - drainStartedAt < drainTimeoutMs) {
-    await sleep(25);
+  const warmupWindow = warmupTimeSeconds > 0 ? await runWindow(warmupTimeSeconds) : undefined;
+  if (warmupWindow && !(await waitForDrain(() => totalInFlight, drainTimeoutMs))) {
+    agent.destroy();
+    throw new Error(`Warm-up requests did not drain within ${drainTimeoutMs}ms.`);
   }
-  if (counters.inFlight > 0) {
+  const measurementWindow = await runWindow(testTimeSeconds);
+  const {
+    counters,
+    latencyHistogram,
+    socketQueueHistogram,
+    connectionSetupHistogram,
+    timeToFirstByteHistogram,
+    sampledKeys,
+    httpStatusCounts,
+    requestErrorCounts,
+    startedAt
+  } = measurementWindow;
+  const targetRequests = Math.floor(targetRps * testTimeSeconds);
+
+  if (!(await waitForDrain(() => totalInFlight, drainTimeoutMs))) {
     agent.destroy();
     const destroyStartedAt = performance.now();
-    while (counters.inFlight > 0 && performance.now() - destroyStartedAt < 5_000) {
+    while (totalInFlight > 0 && performance.now() - destroyStartedAt < 5_000) {
       await sleep(25);
     }
   } else {
@@ -205,6 +284,7 @@ async function main() {
     counters.succeeded === 0 ? 0 : counters.redisCommands / counters.succeeded;
   const result = {
     pattern,
+    accept_encoding: acceptEncoding ?? "identity",
     random_seed: randomSeed,
     ...(process.env.QUERY_GENERATOR_SHARD_INDEX
       ? {
@@ -216,6 +296,27 @@ async function main() {
         }
       : {}),
     sample_pool_size: Object.fromEntries(Object.entries(samplePool).map(([name, values]) => [name, values.length])),
+    warmup_time_seconds: warmupTimeSeconds,
+    ...(warmupWindow
+      ? {
+          warmup: {
+            target_requests: Math.floor(targetRps * warmupTimeSeconds),
+            started_requests: warmupWindow.counters.started,
+            completed_requests: warmupWindow.counters.completed,
+            successful_requests: warmupWindow.counters.succeeded,
+            dropped_requests: warmupWindow.counters.dropped,
+            http_errors: warmupWindow.counters.httpErrors,
+            request_errors: warmupWindow.counters.requestErrors,
+            peak_in_flight: warmupWindow.counters.peakInFlight,
+            latency_ms: {
+              p50: percentile(warmupWindow.latencyHistogram, warmupWindow.counters.completed, 0.5),
+              p95: percentile(warmupWindow.latencyHistogram, warmupWindow.counters.completed, 0.95),
+              p99: percentile(warmupWindow.latencyHistogram, warmupWindow.counters.completed, 0.99),
+              p99_9: percentile(warmupWindow.latencyHistogram, warmupWindow.counters.completed, 0.999)
+            }
+          }
+        }
+      : {}),
     distinct_sample_keys: sampledKeys.size,
     target_rps: targetRps,
     achieved_rps: round(counters.succeededDuringWindow / testTimeSeconds),
@@ -238,9 +339,24 @@ async function main() {
       ? 0
       : roundTo((counters.httpErrors + counters.requestErrors) / counters.completed, 6),
     response_bytes: counters.responseBytes,
+    successful_response_bytes: counters.successfulResponseBytes,
+    successful_response_bytes_during_window: counters.successfulResponseBytesDuringWindow,
+    http_error_response_bytes: counters.httpErrorResponseBytes,
+    api_payload_bytes: counters.apiPayloadBytes,
+    api_payload_bytes_during_window: counters.apiPayloadBytesDuringWindow,
+    average_successful_response_bytes:
+      counters.succeeded === 0 ? 0 : round(counters.successfulResponseBytes / counters.succeeded),
+    average_api_payload_bytes:
+      counters.succeeded === 0 ? 0 : round(counters.apiPayloadBytes / counters.succeeded),
     redis_commands: counters.redisCommands,
     redis_commands_per_successful_request: round(redisCommandsPerSuccessfulRequest),
     response_megabytes_per_second: round(counters.responseBytes / 1024 / 1024 / testTimeSeconds),
+    successful_response_megabytes_per_second: round(
+      counters.successfulResponseBytesDuringWindow / 1024 / 1024 / testTimeSeconds
+    ),
+    api_payload_megabytes_per_second: round(
+      counters.apiPayloadBytesDuringWindow / 1024 / 1024 / testTimeSeconds
+    ),
     peak_in_flight: counters.peakInFlight,
     latency_ms: {
       p50: percentile(latencyHistogram, counters.completed, 0.5),
@@ -248,8 +364,16 @@ async function main() {
       p99: percentile(latencyHistogram, counters.completed, 0.99),
       p99_9: percentile(latencyHistogram, counters.completed, 0.999)
     },
+    socket_queue_ms: latencySummary(socketQueueHistogram),
+    connection_setup_ms: latencySummary(connectionSetupHistogram),
+    time_to_first_byte_ms: latencySummary(timeToFirstByteHistogram),
     ...(process.env.QUERY_EXPORT_LATENCY_HISTOGRAM === "1"
-      ? { latency_histogram_ms: sparseHistogram(latencyHistogram) }
+      ? {
+          latency_histogram_ms: sparseHistogram(latencyHistogram),
+          socket_queue_histogram_ms: sparseHistogram(socketQueueHistogram),
+          connection_setup_histogram_ms: sparseHistogram(connectionSetupHistogram),
+          time_to_first_byte_histogram_ms: sparseHistogram(timeToFirstByteHistogram)
+        }
       : {}),
     base_url: baseUrl.origin
   };
@@ -320,6 +444,35 @@ function readPositiveNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readNonNegativeNumber(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function createCounters(): Counters {
+  return {
+    started: 0,
+    completed: 0,
+    succeeded: 0,
+    succeededDuringWindow: 0,
+    httpErrors: 0,
+    requestErrors: 0,
+    dropped: 0,
+    responseBytes: 0,
+    successfulResponseBytes: 0,
+    successfulResponseBytesDuringWindow: 0,
+    httpErrorResponseBytes: 0,
+    apiPayloadBytes: 0,
+    apiPayloadBytesDuringWindow: 0,
+    redisCommands: 0,
+    redisCommandsDuringWindow: 0,
+    inFlight: 0,
+    peakInFlight: 0
+  };
+}
+
 function isLoadQueryPattern(value: string | undefined): value is LoadQueryPattern {
   return value !== undefined && value in QUERY_PROFILES;
 }
@@ -360,6 +513,11 @@ function positiveHeaderNumber(value: string | string[] | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
+function nonNegativeHeaderNumber(value: string | string[] | undefined): number {
+  const parsed = Number(Array.isArray(value) ? value[0] : value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
 function incrementCount(counts: Map<string, number>, name: string): void {
   counts.set(name, (counts.get(name) ?? 0) + 1);
 }
@@ -368,7 +526,12 @@ function requestErrorName(error: unknown): string {
   if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
     return error.code;
   }
-  if (error instanceof Error && error.message === "request timeout") return "request_timeout";
+  if (error instanceof Error && error.message === "wall clock request timeout") {
+    return "wall_clock_request_timeout";
+  }
+  if (error instanceof Error && error.message === "socket inactivity timeout") {
+    return "socket_inactivity_timeout";
+  }
   if (error instanceof Error) return error.name;
   return "unknown";
 }
@@ -382,6 +545,14 @@ async function waitForScheduledStart(): Promise<void> {
   }
   const waitMs = startAt - Date.now();
   if (waitMs > 0) await sleep(waitMs);
+}
+
+async function waitForDrain(inFlight: () => number, timeoutMs: number): Promise<boolean> {
+  const startedAt = performance.now();
+  while (inFlight() > 0 && performance.now() - startedAt < timeoutMs) {
+    await sleep(25);
+  }
+  return inFlight() === 0;
 }
 
 function recordLatency(histogram: Uint32Array, latencyMs: number): void {
@@ -408,6 +579,17 @@ function sparseHistogram(histogram: Uint32Array): Array<[number, number]> {
   return buckets;
 }
 
+function latencySummary(histogram: Uint32Array) {
+  const total = histogram.reduce((sum, count) => sum + count, 0);
+  return {
+    samples: total,
+    p50: percentile(histogram, total, 0.5),
+    p95: percentile(histogram, total, 0.95),
+    p99: percentile(histogram, total, 0.99),
+    p99_9: percentile(histogram, total, 0.999)
+  };
+}
+
 function round(value: number): number {
   return Math.round(value * 100) / 100;
 }
@@ -421,7 +603,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main()
+  .then(() => process.exit(process.exitCode ?? 0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });

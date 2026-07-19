@@ -7,11 +7,12 @@ TOTAL_MAX_IN_FLIGHT="${QUERY_MAX_IN_FLIGHT:-10000}"
 TOTAL_MAX_SOCKETS="${QUERY_MAX_SOCKETS:-10000}"
 TOTAL_MAX_FREE_SOCKETS="${QUERY_MAX_FREE_SOCKETS:-512}"
 BASE_RANDOM_SEED="${QUERY_RANDOM_SEED:-20260714}"
+WARMUP_TIME="${QUERY_WARMUP_TIME:-0}"
 START_DELAY_SECONDS="${QUERY_SHARD_START_DELAY_SECONDS:-10}"
 RUN_ID="${QUERY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_ROOT="${LOAD_TEST_OUTPUT_DIR:-memtier-output}/query-account-by-id-${PROCESS_COUNT}-shards-${RUN_ID}"
 
-for value_name in PROCESS_COUNT TOTAL_TARGET_RPS TOTAL_MAX_IN_FLIGHT TOTAL_MAX_SOCKETS TOTAL_MAX_FREE_SOCKETS BASE_RANDOM_SEED START_DELAY_SECONDS; do
+for value_name in PROCESS_COUNT TOTAL_TARGET_RPS TOTAL_MAX_IN_FLIGHT TOTAL_MAX_SOCKETS TOTAL_MAX_FREE_SOCKETS BASE_RANDOM_SEED WARMUP_TIME START_DELAY_SECONDS; do
   value="${!value_name}"
   if [[ ! "$value" =~ ^[0-9]+$ ]]; then
     echo "${value_name} must be a non-negative integer." >&2
@@ -76,6 +77,7 @@ for ((index = 0; index < PROCESS_COUNT; index += 1)); do
     export LOAD_TEST_OUTPUT_DIR="$shard_directory"
     export LOAD_TEST_START_AT_EPOCH_MS="$START_AT_EPOCH_MS"
     export QUERY_DEFAULT_TARGET_RPS="$shard_target_rps"
+    export QUERY_WARMUP_TIME="$WARMUP_TIME"
     export QUERY_MAX_IN_FLIGHT="$shard_max_in_flight"
     export QUERY_MAX_SOCKETS="$shard_max_sockets"
     export QUERY_MAX_FREE_SOCKETS="$shard_max_free_sockets"

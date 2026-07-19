@@ -77,7 +77,7 @@ variable "throughput_measurement_by" {
 variable "throughput_measurement_value" {
   description = "Redis Cloud Pro/Flexible throughput target. With operations-per-second, this is the requested ops/sec capacity."
   type        = number
-  default     = 180000
+  default     = 300000
 }
 
 variable "redis_version" {

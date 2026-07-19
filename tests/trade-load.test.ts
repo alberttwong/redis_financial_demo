@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { transactionKey } from "../src/lib/keys";
-import { transactionForPosition } from "../src/lib/trade-load";
+import { selectTradeAccountsForShard, transactionForPosition } from "../src/lib/trade-load";
 
 test("distributed trade samples preserve each selected position hash tag", () => {
   const position = {
@@ -27,6 +27,17 @@ test("distributed trade samples preserve each selected position hash tag", () =>
       transaction.acct_type_code,
       transaction.transaction_id
     ),
-    /^txn:\{pos:A42:SPX42:CASH\}:/
+    /^txn:\{acct:A42\}:SPX42:CASH:/
   );
+});
+
+test("trade generator shards select balanced disjoint account partitions", () => {
+  const accounts = Array.from({ length: 20 }, (_, index) => `A${String(index + 1).padStart(4, "0")}`);
+  const first = selectTradeAccountsForShard(accounts, 11, 1, 2, () => 0.5);
+  const second = selectTradeAccountsForShard(accounts, 11, 2, 2, () => 0.5);
+
+  assert.equal(first.length, 6);
+  assert.equal(second.length, 5);
+  assert.equal(new Set([...first, ...second]).size, 11);
+  assert.deepEqual(first.filter((accountId) => second.includes(accountId)), []);
 });
