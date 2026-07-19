@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+dnf install -y --allowerasing curl jq tar unzip
+
+curl -fsSL https://rpm.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh
+bash /tmp/nodesource_setup.sh
+dnf install -y nodejs --allowerasing
+
+if ! command -v aws >/dev/null 2>&1; then
+  curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install
+fi
+
+app_dir=/home/ec2-user/redis-financial-demo
+bundle_file=/tmp/lpl-api-bundle.tgz
+mkdir -p "$app_dir"
+
+bundle_downloaded=0
+for _ in $(seq 1 120); do
+  if aws s3 cp \
+    "s3://${bundle_bucket}/${bundle_key}" \
+    "$bundle_file" \
+    --region "${aws_region}"; then
+    bundle_downloaded=1
+    break
+  fi
+  sleep 10
+done
+
+if [[ "$bundle_downloaded" -ne 1 ]]; then
+  echo "Deployment bundle was not available after 20 minutes." >&2
+  exit 1
+fi
+
+find "$app_dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+tar -xzf "$bundle_file" -C "$app_dir"
+chown -R ec2-user:ec2-user "$app_dir"
+chmod 600 "$app_dir/.env.local"
+
+cd "$app_dir"
+sudo -u ec2-user npm ci
+sudo -u ec2-user npm run build
+
+cat >/etc/lpl-query-api.env <<'EOF'
+API_WORKLOAD_CLASS=${api_pool}
+API_REDIS_POOL_SIZE=${redis_pool_size}
+REDIS_POOL_SIZE=${redis_pool_size}
+API_MAX_CONCURRENT_LIGHT=${max_concurrency_light}
+API_MAX_CONCURRENT_POSITIONS=${max_concurrency_positions}
+API_MAX_CONCURRENT_TRANSACTIONS=${max_concurrency_transactions}
+API_MAX_CONCURRENT_PORTFOLIO=${max_concurrency_portfolio}
+API_MAX_CONCURRENT_ACTIVITY=${max_concurrency_activity}
+API_MAX_CONCURRENT_SNAPSHOT=${max_concurrency_snapshot}
+NODE_ENV=production
+EOF
+chmod 600 /etc/lpl-query-api.env
+
+cat >/etc/systemd/system/lpl-query-api.service <<'EOF'
+[Unit]
+Description=LPL Redis query API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/redis-financial-demo
+EnvironmentFile=/etc/lpl-query-api.env
+ExecStart=/home/ec2-user/redis-financial-demo/node_modules/.bin/next start -H 0.0.0.0 -p ${web_port} --keepAliveTimeout 65000
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now lpl-query-api.service
+
+for _ in $(seq 1 120); do
+  if curl -fsS "http://127.0.0.1:${web_port}/api/health" >/dev/null; then
+    touch /opt/lpl-load-runner-ready
+    exit 0
+  fi
+  sleep 2
+done
+
+journalctl -u lpl-query-api.service -n 200 --no-pager
+exit 1

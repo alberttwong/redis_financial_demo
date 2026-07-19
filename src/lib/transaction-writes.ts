@@ -1,6 +1,7 @@
 import type { RedisClientType } from "redis";
-import { positionId, positionKey, transactionDocumentId, transactionKey } from "./keys";
-import type { PositionRow, TransactionRow } from "./types";
+import { positionId, positionKey, snapshotKey, transactionDocumentId, transactionKey } from "./keys";
+import { SECURITY_PROJECTION_FIELDS } from "./projections";
+import type { PositionRow, SecurityProjection, SecurityRow, TransactionRow } from "./types";
 
 export const TRANSACTION_TYPES = ["BUY", "SELL", "DIVIDEND", "INTEREST", "TRANSFER", "FEE"] as const;
 
@@ -11,21 +12,33 @@ export type ApplyTransactionResult = {
   quantity_delta: number;
   position_quantity: number | null;
   position_projection: Omit<PositionRow, "payload"> | null;
+  projection_revision: number;
+  transaction_added: boolean;
+  position_updated: boolean;
   transaction_key: string;
   position_key: string;
+  snapshot_key: string;
   market_value_recalculation_required: boolean;
 };
 
 type FunctionReply = Pick<
   ApplyTransactionResult,
-  "status" | "quantity_delta" | "position_quantity" | "position_projection"
+  | "status"
+  | "quantity_delta"
+  | "position_quantity"
+  | "position_projection"
+  | "projection_revision"
+  | "transaction_added"
+  | "position_updated"
 >;
 
 export async function applyTransaction(
   client: RedisClientType,
-  transaction: TransactionRow
+  transaction: TransactionRow,
+  security: SecurityRow | SecurityProjection
 ): Promise<ApplyTransactionResult> {
   validateTransaction(transaction);
+  validateSecurity(security, transaction);
 
   const transactionRedisKey = transactionKey(
     transaction.account_id,
@@ -38,6 +51,7 @@ export async function applyTransaction(
     transaction.security_no,
     transaction.acct_type_code
   );
+  const snapshotRedisKey = snapshotKey(transaction.account_id);
   const positionTemplate: PositionRow = {
     _id: positionId(transaction.account_id, transaction.security_no, transaction.acct_type_code),
     account_id: transaction.account_id,
@@ -54,11 +68,14 @@ export async function applyTransaction(
   const raw = await client.sendCommand([
     "FCALL",
     "apply_transaction",
-    "2",
+    "3",
     transactionRedisKey,
     positionRedisKey,
+    snapshotRedisKey,
     JSON.stringify(transaction),
-    JSON.stringify(positionTemplate)
+    JSON.stringify(positionTemplate),
+    JSON.stringify(projectSecurity(security)),
+    new Date().toISOString()
   ]);
   const reply = parseFunctionReply(raw);
 
@@ -66,8 +83,32 @@ export async function applyTransaction(
     ...reply,
     transaction_key: transactionRedisKey,
     position_key: positionRedisKey,
+    snapshot_key: snapshotRedisKey,
     market_value_recalculation_required: reply.status === "inserted" && reply.quantity_delta !== 0
   };
+}
+
+function projectSecurity(security: SecurityRow | SecurityProjection): SecurityProjection {
+  return Object.fromEntries(
+    SECURITY_PROJECTION_FIELDS.map((field) => [field, security[field]])
+  ) as SecurityProjection;
+}
+
+function validateSecurity(security: SecurityRow | SecurityProjection, transaction: TransactionRow): void {
+  if (!security || typeof security !== "object") {
+    throw new Error("security must be an object");
+  }
+  for (const field of ["_id", "security_id", "security_no"] as const) {
+    if (typeof security[field] !== "string" || security[field].length === 0) {
+      throw new Error(`security.${field} must be a non-empty string`);
+    }
+  }
+  if (security.security_id !== transaction.security_id) {
+    throw new Error("security.security_id does not match transaction.security_id");
+  }
+  if (security.security_no !== transaction.security_no) {
+    throw new Error("security.security_no does not match transaction.security_no");
+  }
 }
 
 function validateTransaction(transaction: TransactionRow): void {
@@ -140,13 +181,25 @@ function parseFunctionReply(raw: unknown): FunctionReply {
   if (parsed.position_quantity !== null && typeof parsed.position_quantity !== "number") {
     throw new Error("apply_transaction returned an invalid position_quantity");
   }
+  if (typeof parsed.projection_revision !== "number" || !Number.isFinite(parsed.projection_revision)) {
+    throw new Error("apply_transaction returned an invalid projection_revision");
+  }
+  if (typeof parsed.transaction_added !== "boolean") {
+    throw new Error("apply_transaction returned an invalid transaction_added");
+  }
+  if (typeof parsed.position_updated !== "boolean") {
+    throw new Error("apply_transaction returned an invalid position_updated");
+  }
   const positionProjection = parsePositionProjection(parsed.position_projection);
 
   return {
     status: parsed.status,
     quantity_delta: parsed.quantity_delta,
     position_quantity: parsed.position_quantity ?? null,
-    position_projection: positionProjection
+    position_projection: positionProjection,
+    projection_revision: parsed.projection_revision,
+    transaction_added: parsed.transaction_added,
+    position_updated: parsed.position_updated
   };
 }
 

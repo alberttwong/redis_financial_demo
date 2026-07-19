@@ -32,7 +32,8 @@ trade_run_id="${MEMTIER_TRADE_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 trade_date="${MEMTIER_TRADE_DATE:-$(date -u +%Y-%m-%d)}"
 trade_date_epoch="$(node -e 'console.log(Date.parse(`${process.argv[1]}T00:00:00.000Z`))' "$trade_date")"
 trade_payload_bytes="${MEMTIER_TRADE_PAYLOAD_BYTES:-1024}"
-position_key='pos:A00000001:SPX000001:LOAD'
+position_key='pos:{acct:A00000001}:SPX000001:LOAD'
+snapshot_key='acct-snapshot:{acct:A00000001}'
 trade_json_arg="$(
   node -e '
     const target = Number(process.argv[1]);
@@ -75,7 +76,28 @@ position_json_arg="$(
     process.stdout.write(JSON.stringify(JSON.stringify(row)));
   ' "$trade_date"
 )"
-trade_command="FCALL apply_transaction 2 __key__ ${position_key} ${trade_json_arg} ${position_json_arg}"
+security_json_arg="$(
+  node -e '
+    const row = {
+      _id: "SEC00000001",
+      security_id: "SEC00000001",
+      security_no: "SPX000001",
+      symbol: "SPX1",
+      cusip: "000000001",
+      asset_class: "EQUITY",
+      index_name: "S&P 500",
+      index_member: true,
+      sector: "Financials",
+      industry: "Capital Markets",
+      exchange: "NYSE",
+      issuer_name: "Load Test Security",
+      status: "ACTIVE"
+    };
+    process.stdout.write(JSON.stringify(JSON.stringify(row)));
+  '
+)"
+generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+trade_command="FCALL apply_transaction 3 __key__ ${position_key} ${snapshot_key} ${trade_json_arg} ${position_json_arg} ${security_json_arg} ${generated_at}"
 
 tls_args=()
 if [[ "${REDIS_TLS:-false}" == "true" ]]; then
@@ -102,7 +124,7 @@ memtier_benchmark \
   --pipeline "${MEMTIER_TRADE_PIPELINE:-64}" \
   --rate-limiting "$trade_rate_per_connection" \
   --test-time "${MEMTIER_TEST_TIME:-60}" \
-  --key-prefix "txn:{pos:A00000001:SPX000001:LOAD}:load:${trade_run_id}:" \
+  --key-prefix "txn:{acct:A00000001}:SPX000001:LOAD:load:${trade_run_id}:" \
   --key-minimum 1 \
   --key-maximum "${MEMTIER_TRADE_KEY_MAXIMUM:-10000000}" \
   --command "$trade_command" \

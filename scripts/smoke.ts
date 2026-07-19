@@ -10,8 +10,8 @@ import {
   securityByNo,
   transactionsSearch
 } from "../src/lib/queries";
+import { serializeQueryResponse } from "../src/lib/query-response";
 import { closeRedisClient, getRedisClient } from "../src/lib/redis";
-import { jsonBytes } from "../src/lib/timing";
 
 async function main() {
   const client = await getRedisClient();
@@ -35,13 +35,14 @@ async function main() {
   console.log(`Smoke account key: ${accountKey(accountId)}`);
   for (const [name, run] of checks) {
     const result = await run();
+    const serialized = serializeQueryResponse(result);
     console.log(
-      `${name}: count=${result.result_count} bytes=${result.payload_bytes} total_ms=${result.timing.total_ms} redis_ms=${result.timing.redis_ms}`
+      `${name}: count=${result.result_count} bytes=${serialized.payloadBytes} total_ms=${result.timing.total_ms} redis_ms=${result.timing.redis_ms}`
     );
   }
 
   const account = await accountById({ client }, accountId);
-  console.log(`Account document size check: ${jsonBytes(account.data)} bytes`);
+  console.log(`Account document size check: ${serializeQueryResponse(account).payloadBytes} bytes`);
 }
 
 main()

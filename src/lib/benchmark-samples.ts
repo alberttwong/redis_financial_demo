@@ -77,6 +77,17 @@ export async function loadBenchmarkSamplePool(
   return pool;
 }
 
+export async function loadBenchmarkAccountIds(
+  client: RedisClientType,
+  count: number
+): Promise<string[]> {
+  const limit = Math.max(1, Math.min(5_000, Math.floor(count)));
+  const accounts = await searchKeys(client, INDEXES.accounts, "*", { limit });
+  const accountIds = accounts.keys.flatMap(accountIdFromKey);
+  if (accountIds.length === 0) throw new Error("Benchmark sample pool has no accounts");
+  return accountIds;
+}
+
 export function selectQuerySample(
   pool: BenchmarkSamplePool,
   pattern: QueryPattern,
@@ -146,6 +157,6 @@ function choose<T>(values: T[], random: () => number): T {
 }
 
 function accountIdFromKey(key: string): string[] {
-  const match = /^acct:(.+):info$/.exec(key);
+  const match = /^acct:\{acct:([^{}]+)\}:info$/.exec(key);
   return match ? [match[1]] : [];
 }

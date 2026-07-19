@@ -24,3 +24,40 @@ export function transactionForPosition(
     payload
   };
 }
+
+export function selectTradeAccountsForShard(
+  accountIds: string[],
+  totalSampleSize: number,
+  shardIndex: number,
+  shardCount: number,
+  random: () => number
+): string[] {
+  if (!Number.isInteger(shardCount) || shardCount < 1) {
+    throw new Error("Trade shard count must be a positive integer");
+  }
+  if (!Number.isInteger(shardIndex) || shardIndex < 1 || shardIndex > shardCount) {
+    throw new Error(`Trade shard index must be between 1 and ${shardCount}`);
+  }
+
+  const uniqueAccountIds = [...new Set(accountIds)].sort();
+  const shardAccountIds = uniqueAccountIds.filter(
+    (_accountId, index) => index % shardCount === shardIndex - 1
+  );
+  for (let index = shardAccountIds.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [shardAccountIds[index], shardAccountIds[swapIndex]] = [
+      shardAccountIds[swapIndex],
+      shardAccountIds[index]
+    ];
+  }
+
+  const base = Math.floor(totalSampleSize / shardCount);
+  const remainder = totalSampleSize % shardCount;
+  const shardSampleSize = base + (shardIndex <= remainder ? 1 : 0);
+  if (shardAccountIds.length < shardSampleSize) {
+    throw new Error(
+      `Trade shard ${shardIndex}/${shardCount} has ${shardAccountIds.length} accounts but needs ${shardSampleSize}`
+    );
+  }
+  return shardAccountIds.slice(0, shardSampleSize);
+}

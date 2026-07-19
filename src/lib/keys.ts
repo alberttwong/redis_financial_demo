@@ -1,5 +1,9 @@
+export function accountSlotTag(accountId: string): string {
+  return `acct:${accountId}`;
+}
+
 export function accountKey(accountId: string): string {
-  return `acct:${accountId}:info`;
+  return `acct:{${accountSlotTag(accountId)}}:info`;
 }
 
 export function securityKey(securityId: string): string {
@@ -10,12 +14,8 @@ export function positionId(accountId: string, securityNo: string, acctTypeCode: 
   return `${accountId}|${securityNo}|${acctTypeCode}`;
 }
 
-export function positionSlotTag(accountId: string, securityNo: string, acctTypeCode: string): string {
-  return positionKey(accountId, securityNo, acctTypeCode);
-}
-
 export function positionKey(accountId: string, securityNo: string, acctTypeCode: string): string {
-  return `pos:${accountId}:${securityNo}:${acctTypeCode}`;
+  return `pos:{${accountSlotTag(accountId)}}:${encodeKeyPart(securityNo)}:${encodeKeyPart(acctTypeCode)}`;
 }
 
 export function transactionDocumentId(
@@ -32,12 +32,16 @@ export function transactionKey(
   acctTypeCode: string,
   transactionId: string
 ): string {
-  const slotTag = positionSlotTag(accountId, securityNo, acctTypeCode);
-  return `txn:{${slotTag}}:${encodeKeyPart(transactionId)}`;
+  return [
+    `txn:{${accountSlotTag(accountId)}}`,
+    encodeKeyPart(securityNo),
+    encodeKeyPart(acctTypeCode),
+    encodeKeyPart(transactionId)
+  ].join(":");
 }
 
 export function snapshotKey(accountId: string): string {
-  return `acct-snapshot:${accountId}`;
+  return `acct-snapshot:{${accountSlotTag(accountId)}}`;
 }
 
 function encodeKeyPart(value: string): string {

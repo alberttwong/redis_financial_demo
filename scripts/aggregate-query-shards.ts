@@ -8,10 +8,26 @@ type LatencySummary = {
   p99_9: number;
 };
 
+type SampledLatencySummary = LatencySummary & { samples: number };
+
+type WarmupSummary = {
+  target_requests: number;
+  started_requests: number;
+  completed_requests: number;
+  successful_requests: number;
+  dropped_requests: number;
+  http_errors: number;
+  request_errors: number;
+  peak_in_flight: number;
+  latency_ms: LatencySummary;
+};
+
 type ShardResult = {
   pattern: string;
   random_seed: number;
   generator_shard?: { index: number; count: number; host?: string };
+  warmup_time_seconds?: number;
+  warmup?: WarmupSummary;
   distinct_sample_keys: number;
   target_rps: number;
   achieved_rps: number;
@@ -31,11 +47,24 @@ type ShardResult = {
   http_status_counts: Record<string, number>;
   request_error_counts: Record<string, number>;
   response_bytes: number;
+  successful_response_bytes?: number;
+  successful_response_bytes_during_window?: number;
+  http_error_response_bytes?: number;
+  api_payload_bytes?: number;
+  api_payload_bytes_during_window?: number;
+  successful_response_megabytes_per_second?: number;
+  api_payload_megabytes_per_second?: number;
   redis_commands: number;
   response_megabytes_per_second: number;
   peak_in_flight: number;
   latency_ms: LatencySummary;
+  socket_queue_ms?: SampledLatencySummary;
+  connection_setup_ms?: SampledLatencySummary;
+  time_to_first_byte_ms?: SampledLatencySummary;
   latency_histogram_ms?: Array<[number, number]>;
+  socket_queue_histogram_ms?: Array<[number, number]>;
+  connection_setup_histogram_ms?: Array<[number, number]>;
+  time_to_first_byte_histogram_ms?: Array<[number, number]>;
   base_url: string;
 };
 
@@ -80,12 +109,17 @@ async function main() {
       latencyHistogram.set(latencyMs, (latencyHistogram.get(latencyMs) ?? 0) + count);
     }
   }
+  const socketQueueHistogram = mergeHistograms(shards, "socket_queue_histogram_ms");
+  const connectionSetupHistogram = mergeHistograms(shards, "connection_setup_histogram_ms");
+  const timeToFirstByteHistogram = mergeHistograms(shards, "time_to_first_byte_histogram_ms");
 
   const completedRequests = sum(shards, "completed_requests");
   const successfulRequests = sum(shards, "successful_requests");
   const redisCommands = sum(shards, "redis_commands");
   const httpErrors = sum(shards, "http_errors");
   const requestErrors = sum(shards, "request_errors");
+  const successfulResponseBytes = sumOptional(shards, "successful_response_bytes");
+  const apiPayloadBytes = sumOptional(shards, "api_payload_bytes");
   const generatorHosts = [
     ...new Set(
       shards
@@ -98,6 +132,7 @@ async function main() {
     pattern: first.pattern,
     generator_processes: shards.length,
     generator_hosts: generatorHosts,
+    warmup_time_seconds: Math.max(...shards.map(({ result }) => result.warmup_time_seconds ?? 0)),
     target_rps: sum(shards, "target_rps"),
     achieved_rps: round(sum(shards, "achieved_rps")),
     achieved_redis_ops_per_second: round(sum(shards, "achieved_redis_ops_per_second")),
@@ -120,10 +155,28 @@ async function main() {
     error_rate:
       completedRequests === 0 ? 0 : roundTo((httpErrors + requestErrors) / completedRequests, 6),
     response_bytes: sum(shards, "response_bytes"),
+    successful_response_bytes: successfulResponseBytes,
+    successful_response_bytes_during_window: sumOptional(
+      shards,
+      "successful_response_bytes_during_window"
+    ),
+    http_error_response_bytes: sumOptional(shards, "http_error_response_bytes"),
+    api_payload_bytes: apiPayloadBytes,
+    api_payload_bytes_during_window: sumOptional(shards, "api_payload_bytes_during_window"),
+    average_successful_response_bytes:
+      successfulRequests === 0 ? 0 : round(successfulResponseBytes / successfulRequests),
+    average_api_payload_bytes:
+      successfulRequests === 0 ? 0 : round(apiPayloadBytes / successfulRequests),
     redis_commands: redisCommands,
     redis_commands_per_successful_request:
       successfulRequests === 0 ? 0 : round(redisCommands / successfulRequests),
     response_megabytes_per_second: round(sum(shards, "response_megabytes_per_second")),
+    successful_response_megabytes_per_second: round(
+      sumOptional(shards, "successful_response_megabytes_per_second")
+    ),
+    api_payload_megabytes_per_second: round(
+      sumOptional(shards, "api_payload_megabytes_per_second")
+    ),
     peak_in_flight_sum: sum(shards, "peak_in_flight"),
     distinct_sample_keys_sum: sum(shards, "distinct_sample_keys"),
     latency_ms: {
@@ -132,12 +185,16 @@ async function main() {
       p99: percentile(latencyHistogram, completedRequests, 0.99),
       p99_9: percentile(latencyHistogram, completedRequests, 0.999)
     },
+    socket_queue_ms: sampledLatencySummary(socketQueueHistogram),
+    connection_setup_ms: sampledLatencySummary(connectionSetupHistogram),
+    time_to_first_byte_ms: sampledLatencySummary(timeToFirstByteHistogram),
     base_url: first.base_url,
     shards: shards.map(({ directory, result }) => ({
       directory,
       index: result.generator_shard?.index,
       host: result.generator_shard?.host,
       random_seed: result.random_seed,
+      warmup: result.warmup,
       target_rps: result.target_rps,
       achieved_rps: result.achieved_rps,
       dropped_requests: result.dropped_requests,
@@ -152,6 +209,43 @@ async function main() {
   await writeFile(outputPath, `${JSON.stringify(aggregate, null, 2)}\n`);
   console.log(JSON.stringify(aggregate, null, 2));
   console.log(`Wrote ${outputPath}`);
+}
+
+function sumOptional<K extends keyof ShardResult>(
+  shards: Array<{ result: ShardResult }>,
+  key: K
+): number {
+  return shards.reduce((total, { result }) => {
+    const value = result[key];
+    return total + (typeof value === "number" ? value : 0);
+  }, 0);
+}
+
+function mergeHistograms(
+  shards: Array<{ result: ShardResult }>,
+  key:
+    | "socket_queue_histogram_ms"
+    | "connection_setup_histogram_ms"
+    | "time_to_first_byte_histogram_ms"
+): Map<number, number> {
+  const histogram = new Map<number, number>();
+  for (const { result } of shards) {
+    for (const [latencyMs, count] of result[key] ?? []) {
+      histogram.set(latencyMs, (histogram.get(latencyMs) ?? 0) + count);
+    }
+  }
+  return histogram;
+}
+
+function sampledLatencySummary(histogram: Map<number, number>): SampledLatencySummary {
+  const samples = [...histogram.values()].reduce((total, count) => total + count, 0);
+  return {
+    samples,
+    p50: percentile(histogram, samples, 0.5),
+    p95: percentile(histogram, samples, 0.95),
+    p99: percentile(histogram, samples, 0.99),
+    p99_9: percentile(histogram, samples, 0.999)
+  };
 }
 
 function sum<K extends keyof ShardResult>(
