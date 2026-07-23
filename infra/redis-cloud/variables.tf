@@ -51,6 +51,29 @@ variable "networking_deployment_cidr" {
   default     = "10.90.0.0/24"
 }
 
+variable "enable_aws_vpc_peering" {
+  description = "Create and accept Redis Cloud VPC peering, then route the Redis Cloud deployment CIDR from every route table in the selected AWS VPC."
+  type        = bool
+  default     = false
+
+  validation {
+    condition = (
+      !var.enable_aws_vpc_peering
+      || (
+        lower(var.subscription_type) == "pro"
+        && upper(var.cloud_provider) == "AWS"
+      )
+    )
+    error_message = "enable_aws_vpc_peering requires an AWS Redis Cloud Pro subscription."
+  }
+}
+
+variable "aws_vpc_id" {
+  description = "AWS application VPC to peer with Redis Cloud. When null, the AWS account's default VPC in var.region is used."
+  type        = string
+  default     = null
+}
+
 variable "multiple_availability_zones" {
   description = "Deploy the Redis Cloud Pro/Flexible subscription across multiple availability zones."
   type        = bool

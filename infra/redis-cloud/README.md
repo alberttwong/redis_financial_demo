@@ -15,6 +15,8 @@ Defaults:
 - TLS enabled
 - `noeviction`
 - Redis OSS Cluster API disabled unless explicitly enabled
+- Optional Terraform-managed AWS VPC peering and routes to the private Redis
+  Cloud network
 
 Essentials is still available for smaller demos by setting:
 
@@ -66,6 +68,20 @@ cluster-aware client, plan and apply with:
 
 The external endpoint is required when the benchmark clients run outside the
 Redis Cloud managed VPC. OSS Cluster API requires the Pro subscription path.
+
+To let AWS benchmark hosts reach Redis Cloud private endpoints, including the
+subscription Prometheus endpoint on port `8070`, enable the managed peering:
+
+```sh
+./terraform-with-creds.sh plan \
+  -var='enable_aws_vpc_peering=true'
+./terraform-with-creds.sh apply
+```
+
+By default, the stack peers the default AWS VPC in `var.region`. Set
+`aws_vpc_id` to select a different application VPC. Redis Cloud initiates the
+request; Terraform accepts it in AWS and adds a route for
+`networking_deployment_cidr` to every route table in the selected VPC.
 
 To enable scheduled Redis Cloud backups in the same persistent S3 bucket used
 by the benchmark restore workflow:

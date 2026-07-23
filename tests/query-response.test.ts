@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
-import { encodeQueryResponse, serializeQueryResponse } from "../src/lib/query-response";
+import {
+  encodeQueryResponse,
+  queryTimingHeaders,
+  serializeQueryResponse
+} from "../src/lib/query-response";
 import type { QueryResult } from "../src/lib/types";
 
 test("query responses preserve the public JSON envelope with one data serialization", () => {
@@ -40,6 +44,18 @@ test("query response serialization rejects undefined data", () => {
   };
 
   assert.throws(() => serializeQueryResponse(result), /must be JSON serializable/);
+});
+
+test("query timing headers expose Redis duration for load generators and observability tools", () => {
+  assert.deepEqual(queryTimingHeaders({ redis_ms: 12.34 }), {
+    "server-timing": "redis;dur=12.34",
+    "x-redis-ms": "12.34"
+  });
+  assert.throws(
+    () => queryTimingHeaders({ redis_ms: Number.NaN }),
+    /finite non-negative number/
+  );
+  assert.throws(() => queryTimingHeaders({ redis_ms: -1 }), /finite non-negative number/);
 });
 
 test("query response data is serialized exactly once", () => {

@@ -1,6 +1,6 @@
 import { promisify } from "node:util";
 import { constants, gzip } from "node:zlib";
-import type { QueryResult } from "./types";
+import type { QueryResult, Timings } from "./types";
 
 const gzipAsync = promisify(gzip);
 
@@ -16,6 +16,17 @@ export type EncodedQueryResponse = {
   responseBytes: number;
   wireBytes: number;
 };
+
+export function queryTimingHeaders(timing: Pick<Timings, "redis_ms">): Record<string, string> {
+  if (!Number.isFinite(timing.redis_ms) || timing.redis_ms < 0) {
+    throw new Error("Redis timing must be a finite non-negative number");
+  }
+  const redisMs = String(timing.redis_ms);
+  return {
+    "server-timing": `redis;dur=${redisMs}`,
+    "x-redis-ms": redisMs
+  };
+}
 
 export function serializeQueryResponse<T>(result: QueryResult<T>): SerializedQueryResponse {
   const dataJson = JSON.stringify(result.data);

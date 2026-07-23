@@ -50,6 +50,7 @@ type Counters = {
 type LoadWindow = {
   counters: Counters;
   latencyHistogram: Uint32Array;
+  redisLatencyHistogram: Uint32Array;
   socketQueueHistogram: Uint32Array;
   connectionSetupHistogram: Uint32Array;
   timeToFirstByteHistogram: Uint32Array;
@@ -107,6 +108,7 @@ async function main() {
   const runWindow = async (durationSeconds: number): Promise<LoadWindow> => {
     const counters = createCounters();
     const latencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+    const redisLatencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
     const socketQueueHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
     const connectionSetupHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
     const timeToFirstByteHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
@@ -132,13 +134,21 @@ async function main() {
         let finished = false;
         let deadlineTimer: NodeJS.Timeout | undefined;
 
-        const finish = (
-          statusCode?: number,
+        const finish = ({
+          statusCode,
           bytes = 0,
           redisCommands = 0,
           apiPayloadBytes = 0,
-          requestError?: unknown
-        ) => {
+          redisMs,
+          requestError
+        }: {
+          statusCode?: number;
+          bytes?: number;
+          redisCommands?: number;
+          apiPayloadBytes?: number;
+          redisMs?: number;
+          requestError?: unknown;
+        }) => {
           if (finished) return;
           finished = true;
           if (deadlineTimer) clearTimeout(deadlineTimer);
@@ -156,6 +166,7 @@ async function main() {
             counters.successfulResponseBytes += bytes;
             counters.apiPayloadBytes += apiPayloadBytes;
             counters.redisCommands += redisCommands;
+            if (redisMs !== undefined) recordLatency(redisLatencyHistogram, redisMs);
             if (completedAt <= endsAt) {
               counters.succeededDuringWindow += 1;
               counters.successfulResponseBytesDuringWindow += bytes;
@@ -185,12 +196,28 @@ async function main() {
             recordLatency(timeToFirstByteHistogram, performance.now() - requestStartedAt);
             const redisCommands = positiveHeaderNumber(response.headers["x-redis-command-count"]);
             const apiPayloadBytes = nonNegativeHeaderNumber(response.headers["x-query-payload-bytes"]);
+            const redisMs = optionalNonNegativeHeaderNumber(response.headers["x-redis-ms"]);
             response.on("data", (chunk: Buffer) => {
               bytes += chunk.length;
             });
-            response.on("end", () => finish(response.statusCode, bytes, redisCommands, apiPayloadBytes));
+            response.on("end", () =>
+              finish({
+                statusCode: response.statusCode,
+                bytes,
+                redisCommands,
+                apiPayloadBytes,
+                redisMs
+              })
+            );
             response.on("error", (error) =>
-              finish(response.statusCode, bytes, redisCommands, apiPayloadBytes, error)
+              finish({
+                statusCode: response.statusCode,
+                bytes,
+                redisCommands,
+                apiPayloadBytes,
+                redisMs,
+                requestError: error
+              })
             );
           }
         );
@@ -210,7 +237,7 @@ async function main() {
           requestTimeoutMs
         );
         request.setTimeout(socketTimeoutMs, () => request.destroy(new Error("socket inactivity timeout")));
-        request.on("error", (error) => finish(undefined, 0, 0, 0, error));
+        request.on("error", (error) => finish({ requestError: error }));
         request.end();
       };
 
@@ -239,6 +266,7 @@ async function main() {
     return {
       counters,
       latencyHistogram,
+      redisLatencyHistogram,
       socketQueueHistogram,
       connectionSetupHistogram,
       timeToFirstByteHistogram,
@@ -259,6 +287,7 @@ async function main() {
   const {
     counters,
     latencyHistogram,
+    redisLatencyHistogram,
     socketQueueHistogram,
     connectionSetupHistogram,
     timeToFirstByteHistogram,
@@ -282,6 +311,7 @@ async function main() {
   const finishedAt = performance.now();
   const redisCommandsPerSuccessfulRequest =
     counters.succeeded === 0 ? 0 : counters.redisCommands / counters.succeeded;
+  const redisLatency = latencySummary(redisLatencyHistogram);
   const result = {
     pattern,
     accept_encoding: acceptEncoding ?? "identity",
@@ -364,6 +394,9 @@ async function main() {
       p99: percentile(latencyHistogram, counters.completed, 0.99),
       p99_9: percentile(latencyHistogram, counters.completed, 0.999)
     },
+    redis_latency_ms: redisLatency,
+    redis_timing_missing_samples: Math.max(0, counters.succeeded - redisLatency.samples),
+    redis_latency_histogram_ms: sparseHistogram(redisLatencyHistogram),
     socket_queue_ms: latencySummary(socketQueueHistogram),
     connection_setup_ms: latencySummary(connectionSetupHistogram),
     time_to_first_byte_ms: latencySummary(timeToFirstByteHistogram),
@@ -382,7 +415,11 @@ async function main() {
   await mkdir(outputDirectory, { recursive: true });
   const outputPath = `${outputDirectory}/query-${profile.slug}.json`;
   await writeFile(outputPath, JSON.stringify(result, null, 2) + "\n");
-  const { latency_histogram_ms: _latencyHistogram, ...consoleResult } = result;
+  const {
+    latency_histogram_ms: _latencyHistogram,
+    redis_latency_histogram_ms: _redisLatencyHistogram,
+    ...consoleResult
+  } = result;
   console.log(JSON.stringify(consoleResult, null, 2));
   console.log(`Wrote ${outputPath}`);
 
@@ -514,8 +551,17 @@ function positiveHeaderNumber(value: string | string[] | undefined): number {
 }
 
 function nonNegativeHeaderNumber(value: string | string[] | undefined): number {
-  const parsed = Number(Array.isArray(value) ? value[0] : value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  return optionalNonNegativeHeaderNumber(value) ?? 0;
+}
+
+function optionalNonNegativeHeaderNumber(
+  value: string | string[] | undefined
+): number | undefined {
+  if (value === undefined) return undefined;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw.trim() === "") return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function incrementCount(counts: Map<string, number>, name: string): void {
