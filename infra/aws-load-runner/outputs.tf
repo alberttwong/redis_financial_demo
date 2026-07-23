@@ -117,6 +117,11 @@ output "api_load_balancer_dns" {
   value       = aws_lb.api.dns_name
 }
 
+output "api_load_balancer_arn_suffix" {
+  description = "CloudWatch dimension value for the internal API application load balancer."
+  value       = aws_lb.api.arn_suffix
+}
+
 output "api_target_group_arn" {
   description = "Legacy alias for the light-query API target group ARN."
   value       = aws_lb_target_group.api["light"].arn

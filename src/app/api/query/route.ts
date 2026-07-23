@@ -15,7 +15,11 @@ import {
 } from "@/lib/queries";
 import { isQueryPattern } from "@/lib/benchmark-samples";
 import { queryConcurrency } from "@/lib/query-concurrency";
-import { encodeQueryResponse, serializeQueryResponse } from "@/lib/query-response";
+import {
+  encodeQueryResponse,
+  queryTimingHeaders,
+  serializeQueryResponse
+} from "@/lib/query-response";
 import { getApiWorkloadClass, queryWorkloadClass } from "@/lib/query-workloads";
 import { getRedisClient } from "@/lib/redis";
 
@@ -103,7 +107,8 @@ export async function GET(request: NextRequest) {
         "x-query-payload-bytes": String(serialized.payloadBytes),
         "x-query-response-bytes": String(encoded.responseBytes),
         "x-query-wire-bytes": String(encoded.wireBytes),
-        "x-redis-command-count": String(result.redis_command_count)
+        "x-redis-command-count": String(result.redis_command_count),
+        ...queryTimingHeaders(result.timing)
       }
     });
   } catch (error) {

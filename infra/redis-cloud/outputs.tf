@@ -68,3 +68,23 @@ output "redis_backup_s3_path" {
   description = "Configured Redis Cloud scheduled remote backup path, when enabled."
   value       = var.backup_s3_path
 }
+
+output "rediscloud_aws_vpc_peering_id" {
+  description = "AWS VPC peering connection created by Redis Cloud, when enabled."
+  value       = try(rediscloud_subscription_peering.benchmark[0].aws_peering_id, null)
+}
+
+output "rediscloud_aws_vpc_peering_status" {
+  description = "Redis Cloud's reported AWS VPC peering status, when enabled."
+  value       = try(rediscloud_subscription_peering.benchmark[0].status, null)
+}
+
+output "rediscloud_aws_vpc_id" {
+  description = "AWS application VPC peered with Redis Cloud, when enabled."
+  value       = try(data.aws_vpc.benchmark[0].id, null)
+}
+
+output "rediscloud_aws_route_table_ids" {
+  description = "AWS route tables given a route to the Redis Cloud deployment CIDR."
+  value       = try(sort(data.aws_route_tables.benchmark[0].ids), [])
+}

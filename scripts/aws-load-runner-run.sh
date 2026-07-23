@@ -3,9 +3,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TF_DIR="${ROOT_DIR}/infra/aws-load-runner"
+REDIS_TF_DIR="${ROOT_DIR}/infra/redis-cloud"
 REMOTE_DIR="${AWS_LOAD_RUNNER_REMOTE_DIR:-/home/ec2-user/redis-financial-demo}"
 SSH_USER="${AWS_LOAD_RUNNER_SSH_USER:-ec2-user}"
 SSH_KEY_PATH="${AWS_LOAD_RUNNER_KEY_PATH:-}"
+SSH_KNOWN_HOSTS_FILE="${AWS_LOAD_RUNNER_KNOWN_HOSTS_FILE:-${TMPDIR:-/tmp}/lpl-redis-load-runner-known-hosts-$$}"
 WEB_PORT="${AWS_LOAD_RUNNER_WEB_PORT:-3000}"
 BENCHMARK="${AWS_LOAD_RUNNER_BENCHMARK:-concurrent}"
 API_KEEP_ALIVE_TIMEOUT="${API_KEEP_ALIVE_TIMEOUT:-65000}"
@@ -23,6 +25,19 @@ HOST_READY_TIMEOUT_SECONDS="${AWS_LOAD_RUNNER_HOST_READY_TIMEOUT_SECONDS:-1200}"
 API_READY_TIMEOUT_SECONDS="${AWS_LOAD_RUNNER_API_READY_TIMEOUT_SECONDS:-900}"
 API_ARTIFACT_TIMEOUT_SECONDS="${AWS_LOAD_RUNNER_API_ARTIFACT_TIMEOUT_SECONDS:-30}"
 COLLECT_API_ARTIFACTS="${AWS_LOAD_RUNNER_COLLECT_API_ARTIFACTS:-1}"
+COLLECT_RUNTIME_METRICS="${AWS_LOAD_RUNNER_COLLECT_RUNTIME_METRICS:-1}"
+API_RUNTIME_POLL_INTERVAL_MS="${AWS_LOAD_RUNNER_API_RUNTIME_POLL_INTERVAL_MS:-5000}"
+COLLECT_ALB_METRICS="${AWS_LOAD_RUNNER_COLLECT_ALB_METRICS:-1}"
+CLOUDWATCH_METRIC_DELAY_SECONDS="${AWS_LOAD_RUNNER_CLOUDWATCH_METRIC_DELAY_SECONDS:-60}"
+COLLECT_REDIS_CLOUD_METRICS="${AWS_LOAD_RUNNER_COLLECT_REDIS_CLOUD_METRICS:-1}"
+REDIS_CLOUD_METRIC_POLL_INTERVAL_MS="${AWS_LOAD_RUNNER_REDIS_CLOUD_METRIC_POLL_INTERVAL_MS:-15000}"
+API_METRICS_RUN_ID="${QUERY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
+API_RUNTIME_LOCAL_DIR="${ROOT_DIR}/memtier-output/aws-load-runner/api-runtime-${API_METRICS_RUN_ID}"
+RUNTIME_MONITORS_ACTIVE=0
+REDIS_CLOUD_METRICS_ACTIVE=0
+REDIS_CLOUD_METRICS_AVAILABLE=0
+REDIS_CLOUD_PROMETHEUS_ENDPOINT="${REDISCLOUD_PROMETHEUS_ENDPOINT:-}"
+REDIS_CLOUD_DATABASE_NAME=""
 DEFAULT_ACCOUNT_BY_ID_TARGET_RPS=10000
 DEFAULT_STANDARD_QUERY_TARGET_RPS=9000
 DEFAULT_JOIN_QUERY_TARGET_RPS=45000
@@ -45,11 +60,14 @@ fi
 API_POOL_CAPACITY_JSON="$(terraform -chdir="$TF_DIR" output -json api_pool_capacity)"
 API_ASG_NAMES_JSON="$(terraform -chdir="$TF_DIR" output -json api_autoscaling_group_names)"
 API_TARGET_GROUP_ARNS_JSON="$(terraform -chdir="$TF_DIR" output -json api_target_group_arns)"
+API_LOAD_BALANCER_ARN_SUFFIX="$(terraform -chdir="$TF_DIR" output -raw api_load_balancer_arn_suffix)"
 REDIS_CLUSTER_ROOT_NODES="$(terraform -chdir="$TF_DIR" output -raw redis_oss_cluster_root_nodes)"
 REDIS_CLUSTER_PASSWORD=""
 if [[ -n "$REDIS_CLUSTER_ROOT_NODES" ]]; then
   REDIS_CLUSTER_PASSWORD="$(terraform -chdir="$TF_DIR" output -raw redis_oss_cluster_password)"
 fi
+REDISCLOUD_SUBSCRIPTION_ID="${REDISCLOUD_SUBSCRIPTION_ID:-$(terraform -chdir="$REDIS_TF_DIR" output -raw rediscloud_subscription_id 2>/dev/null || true)}"
+REDISCLOUD_DATABASE_ID="${REDISCLOUD_DATABASE_ID:-$(terraform -chdir="$REDIS_TF_DIR" output -raw rediscloud_database_id 2>/dev/null || true)}"
 HEAVY_STAIRCASE_TARGET_COUNTS_JSON="$(jq -c '{
   positionsByAccount: .positions.desired_capacity,
   transactionsByAccount: .transactions.desired_capacity,
@@ -124,6 +142,38 @@ fi
 
 if [[ "$COLLECT_API_ARTIFACTS" != "0" && "$COLLECT_API_ARTIFACTS" != "1" ]]; then
   echo "AWS_LOAD_RUNNER_COLLECT_API_ARTIFACTS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "$COLLECT_RUNTIME_METRICS" != "0" && "$COLLECT_RUNTIME_METRICS" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_COLLECT_RUNTIME_METRICS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "$COLLECT_ALB_METRICS" != "0" && "$COLLECT_ALB_METRICS" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_COLLECT_ALB_METRICS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "$COLLECT_REDIS_CLOUD_METRICS" != "0" && "$COLLECT_REDIS_CLOUD_METRICS" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_COLLECT_REDIS_CLOUD_METRICS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ ! "$API_RUNTIME_POLL_INTERVAL_MS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "AWS_LOAD_RUNNER_API_RUNTIME_POLL_INTERVAL_MS must be a positive integer." >&2
+  exit 1
+fi
+if [[ ! "$CLOUDWATCH_METRIC_DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "AWS_LOAD_RUNNER_CLOUDWATCH_METRIC_DELAY_SECONDS must be a non-negative integer." >&2
+  exit 1
+fi
+if [[ ! "$REDIS_CLOUD_METRIC_POLL_INTERVAL_MS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "AWS_LOAD_RUNNER_REDIS_CLOUD_METRIC_POLL_INTERVAL_MS must be a positive integer." >&2
+  exit 1
+fi
+if [[ "${REDISCLOUD_PROMETHEUS_INSECURE_TLS:-0}" != "0" && "${REDISCLOUD_PROMETHEUS_INSECURE_TLS:-0}" != "1" ]]; then
+  echo "REDISCLOUD_PROMETHEUS_INSECURE_TLS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ ! "$API_METRICS_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "QUERY_RUN_ID may contain only letters, numbers, dots, underscores, and hyphens." >&2
   exit 1
 fi
 if [[ "$SKIP_BUNDLE_PUBLISH" != "0" && "$SKIP_BUNDLE_PUBLISH" != "1" ]]; then
@@ -328,6 +378,7 @@ SSH_OPTS=(
   -o ConnectTimeout=10
   -o ConnectionAttempts=1
   -o StrictHostKeyChecking=accept-new
+  -o "UserKnownHostsFile=${SSH_KNOWN_HOSTS_FILE}"
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=3
 )
@@ -472,6 +523,226 @@ start_api_fleet() {
   done
 }
 
+start_api_runtime_monitors() {
+  local fleet="$1"
+  shift
+  local hosts=("$@")
+  local api_host
+  local monitor_pid
+  local monitor_pids=()
+  local remote_output="${REMOTE_DIR}/memtier-output/api-runtime-${API_METRICS_RUN_ID}.ndjson"
+  local remote_log="${REMOTE_DIR}/memtier-output/api-runtime-${API_METRICS_RUN_ID}.log"
+  local remote_pid="/tmp/lpl-api-runtime-${API_METRICS_RUN_ID}.pid"
+
+  if [[ "$COLLECT_RUNTIME_METRICS" != "1" ]]; then
+    return 0
+  fi
+  echo "Starting ${fleet} per-worker runtime monitors..."
+  for api_host in "${hosts[@]}"; do
+    (
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
+        "mkdir -p '${REMOTE_DIR}/memtier-output' && \
+         cd '${REMOTE_DIR}' && \
+         if [[ -f '${remote_pid}' ]]; then \
+           stale_pid=\$(cat '${remote_pid}'); \
+           kill -TERM \"\$stale_pid\" 2>/dev/null || true; \
+           rm -f '${remote_pid}'; \
+         fi && \
+         { nohup node --import tsx scripts/capture-api-runtime.ts \
+             'http://127.0.0.1:${WEB_PORT}/api/health' \
+             '${remote_output}' \
+             '${API_RUNTIME_POLL_INTERVAL_MS}' \
+             >'${remote_log}' 2>&1 & \
+           echo \$! >'${remote_pid}'; \
+         }"
+    ) &
+    monitor_pids+=("$!")
+  done
+  for monitor_pid in "${monitor_pids[@]}"; do
+    wait "$monitor_pid"
+  done
+}
+
+stop_api_runtime_monitors() {
+  local fleet="$1"
+  shift
+  local hosts=("$@")
+  local api_host
+  local stop_pid
+  local stop_pids=()
+  local remote_pid="/tmp/lpl-api-runtime-${API_METRICS_RUN_ID}.pid"
+
+  if [[ "$COLLECT_RUNTIME_METRICS" != "1" ]]; then
+    return 0
+  fi
+  echo "Stopping ${fleet} per-worker runtime monitors..."
+  for api_host in "${hosts[@]}"; do
+    (
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
+        "if [[ -f '${remote_pid}' ]]; then \
+           pid=\$(cat '${remote_pid}'); \
+           kill -TERM \"\$pid\" 2>/dev/null || true; \
+           for _ in \$(seq 1 20); do \
+             if ! kill -0 \"\$pid\" 2>/dev/null; then break; fi; \
+             sleep 0.5; \
+           done; \
+           kill -KILL \"\$pid\" 2>/dev/null || true; \
+           rm -f '${remote_pid}'; \
+         fi"
+    ) &
+    stop_pids+=("$!")
+  done
+  for stop_pid in "${stop_pids[@]}"; do
+    wait "$stop_pid" || true
+  done
+}
+
+write_redis_cloud_metric_status() {
+  local status="$1" reason="$2"
+  mkdir -p "$API_RUNTIME_LOCAL_DIR"
+  jq -n \
+    --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg status "$status" \
+    --arg reason "$reason" \
+    --arg subscription_id "$REDISCLOUD_SUBSCRIPTION_ID" \
+    --arg database_id "$REDISCLOUD_DATABASE_ID" \
+    '{
+      captured_at: $captured_at,
+      status: $status,
+      reason: $reason,
+      subscription_id: $subscription_id,
+      database_id: $database_id
+    }' >"${API_RUNTIME_LOCAL_DIR}/redis-cloud-metrics-status.json"
+}
+
+prepare_redis_cloud_metrics() {
+  local control_plane_path="${API_RUNTIME_LOCAL_DIR}/redis-cloud-control-plane.json"
+  if [[ "$COLLECT_REDIS_CLOUD_METRICS" != "1" ]]; then
+    return 0
+  fi
+  if [[ -n "$REDIS_CLUSTER_ROOT_NODES" ]]; then
+    write_redis_cloud_metric_status "skipped" "The benchmark target is the temporary Redis OSS cluster, not Redis Cloud."
+    return 0
+  fi
+  if [[ -z "$REDISCLOUD_SUBSCRIPTION_ID" || -z "$REDISCLOUD_DATABASE_ID" ]]; then
+    write_redis_cloud_metric_status "unavailable" "Redis Cloud subscription and database IDs are unavailable."
+    return 0
+  fi
+
+  mkdir -p "$API_RUNTIME_LOCAL_DIR"
+  echo "Discovering Redis Cloud control-plane and Prometheus metric endpoints..."
+  if (
+    # shellcheck source=load-redis-cloud-credentials.sh
+    . "${ROOT_DIR}/scripts/load-redis-cloud-credentials.sh"
+    node --import tsx scripts/capture-redis-cloud-control-plane.ts \
+      "$REDISCLOUD_SUBSCRIPTION_ID" \
+      "$REDISCLOUD_DATABASE_ID" \
+      "$control_plane_path"
+  ); then
+    REDIS_CLOUD_PROMETHEUS_ENDPOINT="$(jq -r '.prometheus_endpoint // empty' "$control_plane_path")"
+    REDIS_CLOUD_DATABASE_NAME="$(jq -r '.database_name // empty' "$control_plane_path")"
+  elif [[ -z "$REDIS_CLOUD_PROMETHEUS_ENDPOINT" ]]; then
+    write_redis_cloud_metric_status "unavailable" "Redis Cloud API credentials or Prometheus endpoint discovery failed."
+    return 0
+  else
+    write_redis_cloud_metric_status "configured" "Using REDISCLOUD_PROMETHEUS_ENDPOINT because control-plane discovery failed."
+  fi
+
+  if [[ -z "$REDIS_CLOUD_PROMETHEUS_ENDPOINT" ]]; then
+    write_redis_cloud_metric_status "unavailable" "The Redis Cloud subscription did not return a Prometheus endpoint."
+    return 0
+  fi
+  if [[ ! "$REDIS_CLOUD_PROMETHEUS_ENDPOINT" =~ ^https?://[A-Za-z0-9._:/-]+$ && ! "$REDIS_CLOUD_PROMETHEUS_ENDPOINT" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    write_redis_cloud_metric_status "unavailable" "The Redis Cloud Prometheus endpoint has an unsupported format."
+    return 0
+  fi
+  if [[ ! "$REDIS_CLOUD_DATABASE_NAME" =~ ^[A-Za-z0-9._-]*$ ]]; then
+    REDIS_CLOUD_DATABASE_NAME=""
+  fi
+  REDIS_CLOUD_METRICS_AVAILABLE=1
+  write_redis_cloud_metric_status "configured" "Redis Cloud Prometheus sampling is configured for this run."
+}
+
+start_redis_cloud_metric_monitor() {
+  local remote_output="${REMOTE_DIR}/memtier-output/redis-cloud-metrics-${API_METRICS_RUN_ID}.ndjson"
+  local remote_log="${REMOTE_DIR}/memtier-output/redis-cloud-metrics-${API_METRICS_RUN_ID}.log"
+  local remote_pid="/tmp/lpl-redis-cloud-metrics-${API_METRICS_RUN_ID}.pid"
+
+  if [[ "$REDIS_CLOUD_METRICS_AVAILABLE" != "1" ]]; then
+    return 0
+  fi
+  echo "Starting Redis Cloud Prometheus metric sampling on ${GENERATOR_HOST}..."
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
+    "mkdir -p '${REMOTE_DIR}/memtier-output' && \
+     cd '${REMOTE_DIR}' && \
+     if [[ -f '${remote_pid}' ]]; then \
+       stale_pid=\$(cat '${remote_pid}'); \
+       kill -TERM -- \"-\$stale_pid\" 2>/dev/null || true; \
+       rm -f '${remote_pid}'; \
+     fi && \
+     { REDISCLOUD_PROMETHEUS_INSECURE_TLS='${REDISCLOUD_PROMETHEUS_INSECURE_TLS:-0}' \
+       nohup setsid node --import tsx scripts/capture-redis-cloud-prometheus.ts \
+         '${REDIS_CLOUD_PROMETHEUS_ENDPOINT}' \
+         '${REDISCLOUD_DATABASE_ID}' \
+         '${REDIS_CLOUD_DATABASE_NAME}' \
+         '${remote_output}' \
+         '${REDIS_CLOUD_METRIC_POLL_INTERVAL_MS}' \
+         >'${remote_log}' 2>&1 & \
+       echo \$! >'${remote_pid}'; \
+     }"
+  REDIS_CLOUD_METRICS_ACTIVE=1
+}
+
+stop_redis_cloud_metric_monitor() {
+  local remote_pid="/tmp/lpl-redis-cloud-metrics-${API_METRICS_RUN_ID}.pid"
+  if [[ "$REDIS_CLOUD_METRICS_ACTIVE" != "1" ]]; then
+    return 0
+  fi
+  echo "Stopping Redis Cloud Prometheus metric sampling..."
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
+    "if [[ -f '${remote_pid}' ]]; then \
+       pid=\$(cat '${remote_pid}'); \
+       kill -TERM -- \"-\$pid\" 2>/dev/null || true; \
+       for _ in \$(seq 1 40); do \
+         if ! kill -0 \"\$pid\" 2>/dev/null; then break; fi; \
+         sleep 0.5; \
+       done; \
+       kill -KILL -- \"-\$pid\" 2>/dev/null || true; \
+       rm -f '${remote_pid}'; \
+     fi" || true
+  REDIS_CLOUD_METRICS_ACTIVE=0
+}
+
+collect_redis_cloud_metric_artifacts() {
+  local remote_output="${REMOTE_DIR}/memtier-output/redis-cloud-metrics-${API_METRICS_RUN_ID}.ndjson"
+  local remote_log="${REMOTE_DIR}/memtier-output/redis-cloud-metrics-${API_METRICS_RUN_ID}.log"
+  local local_output="${API_RUNTIME_LOCAL_DIR}/redis-cloud-metrics.ndjson"
+  if [[ "$REDIS_CLOUD_METRICS_AVAILABLE" != "1" ]]; then
+    return 0
+  fi
+  rsync -az -e "$RSYNC_SSH" \
+    "${SSH_USER}@${GENERATOR_HOST}:${remote_output}" \
+    "$local_output" || true
+  rsync -az -e "$RSYNC_SSH" \
+    "${SSH_USER}@${GENERATOR_HOST}:${remote_log}" \
+    "${API_RUNTIME_LOCAL_DIR}/redis-cloud-metrics.log" || true
+  if [[ -s "$local_output" ]]; then
+    node --import tsx scripts/summarize-redis-cloud-metrics.ts \
+      "$local_output" \
+      "$API_RUNTIME_LOCAL_DIR" || true
+  fi
+}
+
+cleanup_benchmark_monitors() {
+  set +e
+  if [[ "$RUNTIME_MONITORS_ACTIVE" == "1" ]]; then
+    stop_api_runtime_monitors "all" "${API_HOSTS[@]}"
+  fi
+  stop_redis_cloud_metric_monitor
+  RUNTIME_MONITORS_ACTIVE=0
+  set -e
+}
+
 collect_api_artifacts() {
   local fleet="$1"
   shift
@@ -481,17 +752,30 @@ collect_api_artifacts() {
   local worker_number
   local artifact_pid
   local artifact_pids=()
+  local remote_output="${REMOTE_DIR}/memtier-output/api-runtime-${API_METRICS_RUN_ID}.ndjson"
+  local remote_log="${REMOTE_DIR}/memtier-output/api-runtime-${API_METRICS_RUN_ID}.log"
 
+  mkdir -p "$API_RUNTIME_LOCAL_DIR"
   for index in "${!hosts[@]}"; do
     api_host="${hosts[$index]}"
     worker_number="$(printf '%02d' "$((index + 1))")"
     (
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
-        "timeout ${API_ARTIFACT_TIMEOUT_SECONDS}s curl --max-time ${API_ARTIFACT_TIMEOUT_SECONDS} -fsS 'http://127.0.0.1:${WEB_PORT}/api/health'" \
-        >"${ROOT_DIR}/memtier-output/aws-load-runner/api-health-${fleet}-${worker_number}.json" || true
-      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
-        "sudo timeout ${API_ARTIFACT_TIMEOUT_SECONDS}s journalctl -u lpl-query-api.service --no-pager -n 500" \
-        >"${ROOT_DIR}/memtier-output/aws-load-runner/web-${fleet}-${worker_number}.log" 2>&1 || true
+      if [[ "$COLLECT_API_ARTIFACTS" == "1" ]]; then
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
+          "timeout ${API_ARTIFACT_TIMEOUT_SECONDS}s curl --max-time ${API_ARTIFACT_TIMEOUT_SECONDS} -fsS 'http://127.0.0.1:${WEB_PORT}/api/health'" \
+          >"${API_RUNTIME_LOCAL_DIR}/api-health-${fleet}-${worker_number}.json" || true
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
+          "sudo timeout ${API_ARTIFACT_TIMEOUT_SECONDS}s journalctl -u lpl-query-api.service --no-pager -n 500" \
+          >"${API_RUNTIME_LOCAL_DIR}/web-${fleet}-${worker_number}.log" 2>&1 || true
+      fi
+      if [[ "$COLLECT_RUNTIME_METRICS" == "1" ]]; then
+        rsync -az -e "$RSYNC_SSH" \
+          "${SSH_USER}@${api_host}:${remote_output}" \
+          "${API_RUNTIME_LOCAL_DIR}/api-runtime-${fleet}-${worker_number}.ndjson" || true
+        rsync -az -e "$RSYNC_SSH" \
+          "${SSH_USER}@${api_host}:${remote_log}" \
+          "${API_RUNTIME_LOCAL_DIR}/api-runtime-${fleet}-${worker_number}.log" || true
+      fi
     ) &
     artifact_pids+=("$!")
   done
@@ -914,6 +1198,14 @@ case "$DATASET_MODE" in
     ;;
 esac
 
+prepare_redis_cloud_metrics
+if [[ "$COLLECT_RUNTIME_METRICS" == "1" || "$REDIS_CLOUD_METRICS_AVAILABLE" == "1" ]]; then
+  RUNTIME_MONITORS_ACTIVE=1
+  trap cleanup_benchmark_monitors EXIT INT TERM
+fi
+start_redis_cloud_metric_monitor
+start_api_runtime_monitors "all" "${API_HOSTS[@]}"
+
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
   "cd '${REMOTE_DIR}' && npm run metrics:redis -- before-${BENCHMARK}"
 
@@ -959,6 +1251,7 @@ case "$BENCHMARK" in
 esac
 
 echo "Running ${BENCHMARK} load in ${QUERY_GENERATOR_MODE} mode against ${QUERY_BASE_URL}..."
+BENCHMARK_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 set +e
 if [[ "$QUERY_GENERATOR_MODE" == "distributed" ]]; then
   if [[ "$BENCHMARK" == "accountById" ]]; then
@@ -1010,6 +1303,12 @@ else
 fi
 benchmark_status=$?
 set -e
+BENCHMARK_ENDED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+stop_api_runtime_monitors "all" "${API_HOSTS[@]}"
+stop_redis_cloud_metric_monitor
+RUNTIME_MONITORS_ACTIVE=0
+trap - EXIT INT TERM
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
   "cd '${REMOTE_DIR}' && npm run metrics:redis -- after-${BENCHMARK}" || true
@@ -1034,7 +1333,7 @@ else
     "${ROOT_DIR}/memtier-output/aws-load-runner/"
 fi
 
-if [[ "$COLLECT_API_ARTIFACTS" == "1" ]]; then
+if [[ "$COLLECT_API_ARTIFACTS" == "1" || "$COLLECT_RUNTIME_METRICS" == "1" ]]; then
   collect_api_artifacts "light" "${LIGHT_API_HOSTS[@]}"
   collect_api_artifacts "positions" "${POSITIONS_API_HOSTS[@]}"
   collect_api_artifacts "transactions" "${TRANSACTIONS_API_HOSTS[@]}"
@@ -1042,10 +1341,43 @@ if [[ "$COLLECT_API_ARTIFACTS" == "1" ]]; then
   collect_api_artifacts "activity" "${ACTIVITY_API_HOSTS[@]}"
   collect_api_artifacts "snapshot" "${SNAPSHOT_API_HOSTS[@]}"
 else
-  echo "Skipping per-worker API artifact collection."
+  echo "Skipping per-worker API artifact and runtime collection."
+fi
+
+if [[ "$COLLECT_RUNTIME_METRICS" == "1" ]]; then
+  if ! node --import tsx scripts/summarize-api-runtime-metrics.ts "$API_RUNTIME_LOCAL_DIR"; then
+    echo "Warning: API runtime metric summarization failed." >&2
+  fi
+fi
+
+collect_redis_cloud_metric_artifacts
+
+if [[ "$COLLECT_ALB_METRICS" == "1" ]]; then
+  if [[ "$CLOUDWATCH_METRIC_DELAY_SECONDS" -gt 0 ]]; then
+    echo "Waiting ${CLOUDWATCH_METRIC_DELAY_SECONDS}s for CloudWatch ALB target metrics..."
+    sleep "$CLOUDWATCH_METRIC_DELAY_SECONDS"
+  fi
+  if ! AWS_REGION="$AWS_REGION" node --import tsx scripts/capture-alb-target-metrics.ts \
+    "$BENCHMARK_STARTED_AT" \
+    "$BENCHMARK_ENDED_AT" \
+    "$API_LOAD_BALANCER_ARN_SUFFIX" \
+    "$API_TARGET_GROUP_ARNS_JSON" \
+    "$API_RUNTIME_LOCAL_DIR"; then
+    echo "Warning: ALB target metric collection failed." >&2
+  fi
+fi
+
+if [[ -n "$DISTRIBUTED_OUTPUT_DIR" ]]; then
+  mkdir -p "${DISTRIBUTED_OUTPUT_DIR}/telemetry"
+  cp -R "${API_RUNTIME_LOCAL_DIR}/." "${DISTRIBUTED_OUTPUT_DIR}/telemetry/" || true
+  for metric_phase in before after; do
+    cp "${ROOT_DIR}/memtier-output/aws-load-runner/redis-metrics-${metric_phase}-${BENCHMARK}.json" \
+      "${DISTRIBUTED_OUTPUT_DIR}/telemetry/" 2>/dev/null || true
+  done
 fi
 
 echo "Downloaded generator results to memtier-output/aws-load-runner"
+echo "Runtime and ALB telemetry: ${API_RUNTIME_LOCAL_DIR}"
 echo "API pool workers and Redis connections:"
 echo "  light: ${#LIGHT_API_HOSTS[@]} workers, ${LIGHT_API_REDIS_POOL_SIZE} connections/worker, concurrency ${LIGHT_API_MAX_CONCURRENCY}"
 echo "  positions: ${#POSITIONS_API_HOSTS[@]} workers, ${POSITIONS_API_REDIS_POOL_SIZE} connections/worker, concurrency ${POSITIONS_API_MAX_CONCURRENCY}"

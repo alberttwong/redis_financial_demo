@@ -9,23 +9,86 @@ import { getRedisConfig } from "./config";
 
 export type RedisConnection = RedisClientType | RedisClusterType;
 
-let clientPromises: Array<Promise<RedisConnection>> | undefined;
-let nextClientIndex = 0;
+type RedisClientState = {
+  client?: RedisConnection;
+  errorCount: number;
+  lastErrorAt?: string;
+};
+
+type RedisPoolState = {
+  clientPromises?: Array<Promise<RedisConnection>>;
+  clientStates?: RedisClientState[];
+  nextClientIndex: number;
+};
+
+const globalRedisPool = globalThis as typeof globalThis & {
+  __lplRedisPool?: RedisPoolState;
+};
+
+function redisPoolState(): RedisPoolState {
+  if (!globalRedisPool.__lplRedisPool) {
+    globalRedisPool.__lplRedisPool = { nextClientIndex: 0 };
+  }
+  return globalRedisPool.__lplRedisPool;
+}
 
 export async function getRedisClient(): Promise<RedisConnection> {
-  if (!clientPromises) {
+  const pool = redisPoolState();
+  if (!pool.clientPromises) {
     const config = getRedisConfig();
-    clientPromises = Array.from({ length: config.poolSize }, (_, index) =>
-      createRedisConnection(index + 1, config.poolSize)
-    );
+    pool.clientStates = Array.from({ length: config.poolSize }, () => ({ errorCount: 0 }));
+    pool.clientPromises = pool.clientStates.map(async (state, index) => {
+      try {
+        const client = await createRedisConnection(index + 1, config.poolSize, () => {
+          state.errorCount += 1;
+          state.lastErrorAt = new Date().toISOString();
+        });
+        state.client = client;
+        return client;
+      } catch (error) {
+        state.errorCount += 1;
+        state.lastErrorAt = new Date().toISOString();
+        throw error;
+      }
+    });
   }
 
-  const selected = clientPromises[nextClientIndex];
-  nextClientIndex = (nextClientIndex + 1) % clientPromises.length;
+  const selected = pool.clientPromises[pool.nextClientIndex];
+  pool.nextClientIndex = (pool.nextClientIndex + 1) % pool.clientPromises.length;
   return selected;
 }
 
-export async function createRedisConnection(index = 1, total = 1): Promise<RedisConnection> {
+export function readRedisConnectionMetrics() {
+  const config = getRedisConfig();
+  const states = redisPoolState().clientStates ?? [];
+  const clients = states.flatMap((state) => (state.client ? [state.client] : []));
+  return {
+    configured_pool_size: config.poolSize,
+    allocated_clients: states.length,
+    initialized_clients: clients.length,
+    connecting_clients: states.filter((state) => !state.client && state.errorCount === 0).length,
+    failed_clients: states.filter((state) => !state.client && state.errorCount > 0).length,
+    open_clients: clients.filter((client) => client.isOpen).length,
+    ready_clients: clients.filter(isRedisConnectionReady).length,
+    cluster_clients: clients.filter(isRedisCluster).length,
+    error_count: states.reduce((total, state) => total + state.errorCount, 0),
+    last_error_at:
+      states
+        .flatMap((state) => (state.lastErrorAt ? [state.lastErrorAt] : []))
+        .sort()
+        .at(-1) ?? null
+  };
+}
+
+function isRedisConnectionReady(client: RedisConnection): boolean {
+  return "isReady" in client ? Boolean(client.isReady) : client.isOpen;
+}
+
+export async function createRedisConnection(
+  index = 1,
+  total = 1,
+  onError?: (error: unknown) => void
+): Promise<RedisConnection> {
   const config = getRedisConfig();
   if (config.clusterMode) {
     const tlsServerName = config.tls ? new URL(config.clusterRootNodes[0]).hostname : undefined;
@@ -44,6 +107,7 @@ export async function createRedisConnection(index = 1, total = 1): Promise<Redis
     }) as RedisClusterType;
 
     cluster.on("error", (error) => {
+      onError?.(error);
       console.error(`Redis cluster client ${index}/${total} error`, error);
     });
     await cluster.connect();
@@ -61,6 +125,7 @@ export async function createRedisConnection(index = 1, total = 1): Promise<Redis
   }) as RedisClientType;
 
   client.on("error", (error) => {
+    onError?.(error);
     console.error(`Redis client ${index}/${total} error`, error);
   });
   await client.connect();
@@ -180,10 +245,12 @@ function isReadonlyCommand(command: string | undefined): boolean {
 }
 
 export async function closeRedisClient(): Promise<void> {
-  if (!clientPromises) return;
-  const pendingClients = clientPromises;
-  clientPromises = undefined;
-  nextClientIndex = 0;
+  const pool = redisPoolState();
+  if (!pool.clientPromises) return;
+  const pendingClients = pool.clientPromises;
+  pool.clientPromises = undefined;
+  pool.clientStates = undefined;
+  pool.nextClientIndex = 0;
   await Promise.all(
     pendingClients.map(async (pendingClient) => {
       const client = await pendingClient;
