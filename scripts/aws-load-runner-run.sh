@@ -366,6 +366,10 @@ sync_host() {
     --exclude '.git/' \
     --exclude '.next/' \
     --exclude 'node_modules/' \
+    --exclude 'tmp/' \
+    --exclude 'output/' \
+    --exclude 'docs/*.docx' \
+    --exclude 'docs/*.pdf' \
     --exclude 'memtier-output/' \
     --exclude 'monitor-input/' \
     --exclude 'infra/redis-cloud/.terraform/' \
