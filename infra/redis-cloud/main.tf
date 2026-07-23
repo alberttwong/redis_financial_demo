@@ -61,7 +61,7 @@ resource "rediscloud_subscription" "demo" {
     replication                  = var.replication
     throughput_measurement_by    = var.throughput_measurement_by
     throughput_measurement_value = var.throughput_measurement_value
-    support_oss_cluster_api      = false
+    support_oss_cluster_api      = var.support_oss_cluster_api
   }
 }
 
@@ -80,8 +80,28 @@ resource "rediscloud_subscription_database" "demo" {
   protocol                     = "redis"
   redis_version                = var.redis_version
   replication                  = var.replication
-  support_oss_cluster_api      = false
-  password                     = local.redis_password
+  support_oss_cluster_api      = var.support_oss_cluster_api
+  external_endpoint_for_oss_cluster_api = (
+    var.support_oss_cluster_api
+    ? var.external_endpoint_for_oss_cluster_api
+    : null
+  )
+  password = local.redis_password
+
+  alert {
+    name  = "dataset-size"
+    value = 80
+  }
+
+  dynamic "remote_backup" {
+    for_each = var.backup_s3_path == null ? [] : [var.backup_s3_path]
+    content {
+      interval     = var.backup_interval
+      time_utc     = var.backup_time_utc
+      storage_type = "aws-s3"
+      storage_path = remote_backup.value
+    }
+  }
 }
 
 resource "rediscloud_essentials_subscription" "demo" {

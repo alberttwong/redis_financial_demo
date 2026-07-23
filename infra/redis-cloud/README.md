@@ -8,12 +8,13 @@ Defaults:
 - AWS `us-west-2`
 - Subscription: `lpl-redis-demo`
 - Database: `lpl-query-patterns`
-- Redis version: `8.4`
+- Redis version: `8.6`
 - Dataset size: 20 GB
 - Throughput sizing: 300,000 operations per second
 - Default Redis Cloud account payment method
 - TLS enabled
 - `noeviction`
+- Redis OSS Cluster API disabled unless explicitly enabled
 
 Essentials is still available for smaller demos by setting:
 
@@ -53,6 +54,35 @@ terraform init
 ./terraform-with-creds.sh apply
 ```
 
+For a Redis Cloud Pro database that advertises its managed shard topology to a
+cluster-aware client, plan and apply with:
+
+```sh
+./terraform-with-creds.sh plan \
+  -var='support_oss_cluster_api=true' \
+  -var='external_endpoint_for_oss_cluster_api=true'
+./terraform-with-creds.sh apply
+```
+
+The external endpoint is required when the benchmark clients run outside the
+Redis Cloud managed VPC. OSS Cluster API requires the Pro subscription path.
+
+To enable scheduled Redis Cloud backups in the same persistent S3 bucket used
+by the benchmark restore workflow:
+
+```sh
+backup_path="$(terraform -chdir=../benchmark-backup output -raw redis_cloud_backup_path)"
+./terraform-with-creds.sh apply \
+  -var="backup_s3_path=${backup_path}" \
+  -var='backup_interval=every-24-hours' \
+  -var='backup_time_utc=06:00'
+```
+
+The bucket must be applied first. `scripts/redis-cloud-rdb.sh backup` creates a
+dated on-demand backup and a stable manifest; `restore` imports all shard files
+listed by that manifest and deliberately requires confirmation because Redis
+Cloud import overwrites the destination database.
+
 Terraform creates paid Redis Cloud resources. Use `terraform destroy` when the demo database is no longer needed.
 
 ## App Env
@@ -63,7 +93,9 @@ After apply:
 terraform output -raw redis_url
 ```
 
-Use that value as `REDIS_URL` in `.env.local`, and set `REDIS_TLS` to the `redis_tls` output.
+For a conventional Redis Cloud endpoint, use `redis_url` as `REDIS_URL`. For an
+OSS Cluster API database, use `redis_cluster_root_nodes` as
+`REDIS_CLUSTER_ROOT_NODES`, plus the `redis_password` and `redis_tls` outputs.
 
 Run from the repo root:
 

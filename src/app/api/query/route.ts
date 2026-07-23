@@ -9,12 +9,13 @@ import {
   securityById,
   securityByNo,
   transactionById,
+  transactionsByAccount,
   transactionsByComposite,
   transactionsSearch
 } from "@/lib/queries";
 import { isQueryPattern } from "@/lib/benchmark-samples";
 import { queryConcurrency } from "@/lib/query-concurrency";
-import { serializeQueryResponse } from "@/lib/query-response";
+import { encodeQueryResponse, serializeQueryResponse } from "@/lib/query-response";
 import { getApiWorkloadClass, queryWorkloadClass } from "@/lib/query-workloads";
 import { getRedisClient } from "@/lib/redis";
 
@@ -88,12 +89,20 @@ export async function GET(request: NextRequest) {
     const client = await getRedisClient();
     const result = await runPattern(pattern, params, startedAt, client);
     const serialized = serializeQueryResponse(result);
-    return new Response(serialized.body, {
+    const encoded = await encodeQueryResponse(
+      serialized,
+      request.headers.get("accept-encoding")
+    );
+    return new Response(encoded.body, {
       headers: {
         ...admissionHeaders,
-        "content-length": String(serialized.responseBytes),
+        ...(encoded.contentEncoding ? { "content-encoding": encoded.contentEncoding } : {}),
+        "content-length": String(encoded.wireBytes),
         "content-type": "application/json; charset=utf-8",
+        "vary": "Accept-Encoding",
         "x-query-payload-bytes": String(serialized.payloadBytes),
+        "x-query-response-bytes": String(encoded.responseBytes),
+        "x-query-wire-bytes": String(encoded.wireBytes),
         "x-redis-command-count": String(result.redis_command_count)
       }
     });
@@ -141,7 +150,7 @@ async function runPattern(
     case "transactionsByComposite":
       return transactionsByComposite(ctx, accountId, securityId, tradeDate, acctTypeCode);
     case "transactionsByAccount":
-      return transactionsSearch(ctx, { accountId, limit });
+      return transactionsByAccount(ctx, accountId, limit);
     case "transactionsBySecurity":
       return transactionsSearch(ctx, { securityId, limit });
     case "transactionsByAccountSecurity":

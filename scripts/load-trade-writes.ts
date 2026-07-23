@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
-import type { RedisClientType } from "redis";
 import { createSeededRandom, loadBenchmarkAccountIds } from "../src/lib/benchmark-samples";
 import { INDEXES } from "../src/lib/indexes";
 import { securityKey, snapshotKey } from "../src/lib/keys";
@@ -12,6 +11,7 @@ import { searchProjected } from "../src/lib/search";
 import { tagEquals } from "../src/lib/tag";
 import { selectTradeAccountsForShard, transactionForPosition } from "../src/lib/trade-load";
 import { applyTransaction } from "../src/lib/transaction-writes";
+import type { RedisConnection } from "../src/lib/redis";
 import type { PositionSample } from "../src/lib/benchmark-samples";
 import type { AccountSnapshot, SecurityProjection } from "../src/lib/types";
 
@@ -245,7 +245,7 @@ async function main() {
 }
 
 async function loadPositionsForAccounts(
-  client: RedisClientType,
+  client: RedisConnection,
   accountIds: string[],
   concurrency: number
 ): Promise<PositionSample[]> {

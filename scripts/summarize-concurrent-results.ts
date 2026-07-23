@@ -5,6 +5,7 @@ type QueryResult = {
   pattern: string;
   target_rps: number;
   achieved_rps: number;
+  successful_requests?: number;
   dropped_requests: number;
   http_errors: number;
   request_errors: number;
@@ -14,6 +15,8 @@ type QueryResult = {
   socket_queue_ms?: {
     p95: number;
   };
+  latency_histogram_ms?: Array<[number, number]>;
+  socket_queue_histogram_ms?: Array<[number, number]>;
   latency_ms: {
     p50: number;
     p95: number;
@@ -51,15 +54,15 @@ async function main() {
   const results = await Promise.all(
     resultPaths.map(async (resultPath) => JSON.parse(await readFile(resultPath, "utf8")) as QueryResult)
   );
-  const byPattern = new Map<string, QueryResult>();
+  const byPattern = new Map<string, QueryResult[]>();
   for (const result of results) {
-    if (byPattern.has(result.pattern)) {
-      throw new Error(`Duplicate concurrent query result for ${result.pattern}.`);
-    }
-    byPattern.set(result.pattern, result);
+    const patternResults = byPattern.get(result.pattern) ?? [];
+    patternResults.push(result);
+    byPattern.set(result.pattern, patternResults);
   }
 
   const queries = [...byPattern.values()]
+    .map(aggregateQueryResults)
     .sort(
       (left, right) =>
         patternIndex(left.pattern) - patternIndex(right.pattern) || left.pattern.localeCompare(right.pattern)
@@ -99,6 +102,110 @@ async function main() {
   process.stdout.write(markdown);
   console.log(`Wrote ${jsonPath}`);
   console.log(`Wrote ${markdownPath}`);
+}
+
+function aggregateQueryResults(results: QueryResult[]): QueryResult {
+  if (results.length === 1) return results[0];
+  const successfulRequests = results.reduce(
+    (total, result) => total + (result.successful_requests ?? result.achieved_rps),
+    0
+  );
+  const latencyHistogram = mergeHistogram(results, "latency_histogram_ms");
+  const socketQueueHistogram = mergeHistogram(results, "socket_queue_histogram_ms");
+  const fallbackLatency = (percentileName: keyof QueryResult["latency_ms"]) =>
+    Math.max(...results.map((result) => result.latency_ms[percentileName]));
+  return {
+    pattern: results[0].pattern,
+    target_rps: sum(results, "target_rps"),
+    achieved_rps: sum(results, "achieved_rps"),
+    successful_requests: successfulRequests,
+    dropped_requests: sum(results, "dropped_requests"),
+    http_errors: sum(results, "http_errors"),
+    request_errors: sum(results, "request_errors"),
+    average_successful_response_bytes: weightedAverage(
+      results,
+      "average_successful_response_bytes",
+      successfulRequests
+    ),
+    average_api_payload_bytes: weightedAverage(results, "average_api_payload_bytes", successfulRequests),
+    successful_response_megabytes_per_second: sum(
+      results,
+      "successful_response_megabytes_per_second"
+    ),
+    socket_queue_ms: {
+      p95:
+        socketQueueHistogram.size > 0
+          ? percentile(socketQueueHistogram, 0.95)
+          : Math.max(...results.map((result) => result.socket_queue_ms?.p95 ?? 0))
+    },
+    latency_histogram_ms: [...latencyHistogram.entries()],
+    socket_queue_histogram_ms: [...socketQueueHistogram.entries()],
+    latency_ms: {
+      p50: latencyHistogram.size > 0 ? percentile(latencyHistogram, 0.5) : fallbackLatency("p50"),
+      p95: latencyHistogram.size > 0 ? percentile(latencyHistogram, 0.95) : fallbackLatency("p95"),
+      p99: latencyHistogram.size > 0 ? percentile(latencyHistogram, 0.99) : fallbackLatency("p99"),
+      p99_9:
+        latencyHistogram.size > 0 ? percentile(latencyHistogram, 0.999) : fallbackLatency("p99_9")
+    }
+  };
+}
+
+function mergeHistogram(
+  results: QueryResult[],
+  key: "latency_histogram_ms" | "socket_queue_histogram_ms"
+): Map<number, number> {
+  const aggregate = new Map<number, number>();
+  for (const result of results) {
+    for (const [value, count] of result[key] ?? []) {
+      aggregate.set(value, (aggregate.get(value) ?? 0) + count);
+    }
+  }
+  return aggregate;
+}
+
+function percentile(histogram: Map<number, number>, ratio: number): number {
+  const samples = [...histogram.values()].reduce((total, count) => total + count, 0);
+  if (samples === 0) return 0;
+  const rank = Math.max(1, Math.ceil(samples * ratio));
+  let cumulative = 0;
+  for (const [value, count] of [...histogram.entries()].sort(([left], [right]) => left - right)) {
+    cumulative += count;
+    if (cumulative >= rank) return value;
+  }
+  return Math.max(...histogram.keys());
+}
+
+function weightedAverage(
+  results: QueryResult[],
+  key: "average_successful_response_bytes" | "average_api_payload_bytes",
+  totalWeight: number
+): number {
+  if (totalWeight === 0) return 0;
+  return round(
+    results.reduce(
+      (total, result) =>
+        total + (result[key] ?? 0) * (result.successful_requests ?? result.achieved_rps),
+      0
+    ) / totalWeight
+  );
+}
+
+function sum(
+  results: QueryResult[],
+  key:
+    | "target_rps"
+    | "achieved_rps"
+    | "dropped_requests"
+    | "http_errors"
+    | "request_errors"
+    | "successful_response_megabytes_per_second"
+): number {
+  return round(
+    results.reduce((total, result) => {
+      const value = result[key];
+      return total + (typeof value === "number" ? value : 0);
+    }, 0)
+  );
 }
 
 async function findQueryResultPaths(rootDirectory: string): Promise<string[]> {

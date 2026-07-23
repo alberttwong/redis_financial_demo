@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { serializeQueryResponse } from "../src/lib/query-response";
+import { gunzipSync } from "node:zlib";
+import { encodeQueryResponse, serializeQueryResponse } from "../src/lib/query-response";
 import type { QueryResult } from "../src/lib/types";
 
 test("query responses preserve the public JSON envelope with one data serialization", () => {
@@ -60,4 +61,40 @@ test("query response data is serialized exactly once", () => {
 
   assert.equal(calls, 1);
   assert.deepEqual(JSON.parse(serialized.body).data, { value: "large response" });
+});
+
+test("query responses are gzip encoded when the client accepts gzip", async () => {
+  const result: QueryResult<{ value: string }> = {
+    data: { value: "compressible-data-".repeat(1_000) },
+    timing: { redis_ms: 1, search_ms: 0, hydrate_ms: 0, join_ms: 0, total_ms: 2 },
+    result_count: 1,
+    redis_command_count: 1,
+    commands: ["JSON.GET key $"]
+  };
+  const serialized = serializeQueryResponse(result);
+
+  const encoded = await encodeQueryResponse(serialized, "br, gzip;q=1");
+
+  assert.equal(encoded.contentEncoding, "gzip");
+  assert(encoded.body instanceof ArrayBuffer);
+  assert(encoded.wireBytes < encoded.responseBytes);
+  assert.equal(gunzipSync(encoded.body).toString("utf8"), serialized.body);
+});
+
+test("query responses remain uncompressed for identity or gzip q=0", async () => {
+  const result: QueryResult<{ value: string }> = {
+    data: { value: "compressible-data-".repeat(1_000) },
+    timing: { redis_ms: 1, search_ms: 0, hydrate_ms: 0, join_ms: 0, total_ms: 2 },
+    result_count: 1,
+    redis_command_count: 1,
+    commands: ["JSON.GET key $"]
+  };
+  const serialized = serializeQueryResponse(result);
+
+  for (const acceptEncoding of ["identity", "gzip;q=0"]) {
+    const encoded = await encodeQueryResponse(serialized, acceptEncoding);
+    assert.equal(encoded.contentEncoding, undefined);
+    assert.equal(encoded.body, serialized.body);
+    assert.equal(encoded.wireBytes, serialized.responseBytes);
+  }
 });

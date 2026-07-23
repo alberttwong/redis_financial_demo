@@ -1,6 +1,6 @@
-import type { RedisClientType } from "redis";
 import { positionId, positionKey, snapshotKey, transactionDocumentId, transactionKey } from "./keys";
 import { SECURITY_PROJECTION_FIELDS } from "./projections";
+import { sendRedisCommand, type RedisConnection } from "./redis";
 import type { PositionRow, SecurityProjection, SecurityRow, TransactionRow } from "./types";
 
 export const TRANSACTION_TYPES = ["BUY", "SELL", "DIVIDEND", "INTEREST", "TRANSFER", "FEE"] as const;
@@ -33,7 +33,7 @@ type FunctionReply = Pick<
 >;
 
 export async function applyTransaction(
-  client: RedisClientType,
+  client: RedisConnection,
   transaction: TransactionRow,
   security: SecurityRow | SecurityProjection
 ): Promise<ApplyTransactionResult> {
@@ -65,7 +65,7 @@ export async function applyTransaction(
     payload: ""
   };
 
-  const raw = await client.sendCommand([
+  const raw = await sendRedisCommand(client, [
     "FCALL",
     "apply_transaction",
     "3",

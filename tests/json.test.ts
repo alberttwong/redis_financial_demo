@@ -57,3 +57,19 @@ test("jsonMGetFields pipelines compact RedisJSON paths", async () => {
     { _id: "P2", quantity: 7 }
   ]);
 });
+
+test("jsonGetFields parses RedisJSON's single-path array reply", async () => {
+  const client = {
+    async sendCommand() {
+      return JSON.stringify([["T1", "T2"]]);
+    }
+  } as unknown as RedisClientType;
+
+  const result = await jsonGetFields<{ recent_transactions: string[] }>(
+    client,
+    "acct-snapshot:{acct:A1}",
+    ["recent_transactions"]
+  );
+
+  assert.deepEqual(result, { recent_transactions: ["T1", "T2"] });
+});

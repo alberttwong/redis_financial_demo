@@ -75,3 +75,52 @@ test("searchProjected skips expired results with no returned attributes", async 
 
   assert.deepEqual(result, { total: 1, rows: [] });
 });
+
+test("searchProjected can stop after a sorted limit without calculating an exact count", async () => {
+  let command: string[] | undefined;
+  const client = {
+    async sendCommand(input: string[]) {
+      command = input;
+      return [0];
+    }
+  } as unknown as RedisClientType;
+
+  await searchProjected<Projection>(client, "idx:transactions", "@security_id:{SEC1}", fields, {
+    limit: 100,
+    dialect: 4,
+    sortBy: {
+      field: "trade_date_epoch",
+      direction: "DESC",
+      withoutCount: true
+    }
+  });
+
+  assert.deepEqual(command, [
+    "FT.SEARCH",
+    "idx:transactions",
+    "@security_id:{SEC1}",
+    "RETURN",
+    "12",
+    "$._id",
+    "AS",
+    "_id",
+    "$.account_id",
+    "AS",
+    "account_id",
+    "$.quantity",
+    "AS",
+    "quantity",
+    "$.active",
+    "AS",
+    "active",
+    "SORTBY",
+    "trade_date_epoch",
+    "DESC",
+    "WITHOUTCOUNT",
+    "LIMIT",
+    "0",
+    "100",
+    "DIALECT",
+    "4"
+  ]);
+});

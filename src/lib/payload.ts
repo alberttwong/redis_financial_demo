@@ -1,3 +1,7 @@
+const payloadCache = new Map<number, string>();
+const payloadChunk = "LPL Redis Cloud financial serving row ".repeat(16);
+const MAX_CACHED_PAYLOAD_LENGTHS = 4096;
+
 export function withSizedPayload<T extends Record<string, unknown>>(row: T, targetBytes: number): T & { payload: string } {
   const base = { ...row, payload: "" };
   const baseBytes = Buffer.byteLength(JSON.stringify(base), "utf8");
@@ -10,10 +14,11 @@ export function withSizedPayload<T extends Record<string, unknown>>(row: T, targ
 
 function makePayload(bytes: number): string {
   if (bytes <= 0) return "";
-  const chunk = "LPL Redis Cloud financial serving row ".repeat(16);
-  let payload = "";
-  while (Buffer.byteLength(payload, "utf8") < bytes) {
-    payload += chunk;
-  }
-  return payload.slice(0, bytes);
+  const cached = payloadCache.get(bytes);
+  if (cached !== undefined) return cached;
+
+  const payload = payloadChunk.repeat(Math.ceil(bytes / payloadChunk.length)).slice(0, bytes);
+  if (payloadCache.size >= MAX_CACHED_PAYLOAD_LENGTHS) payloadCache.clear();
+  payloadCache.set(bytes, payload);
+  return payload;
 }

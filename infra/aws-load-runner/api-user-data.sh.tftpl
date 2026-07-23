@@ -47,6 +47,7 @@ cat >/etc/lpl-query-api.env <<'EOF'
 API_WORKLOAD_CLASS=${api_pool}
 API_REDIS_POOL_SIZE=${redis_pool_size}
 REDIS_POOL_SIZE=${redis_pool_size}
+${redis_cluster_environment}
 API_MAX_CONCURRENT_LIGHT=${max_concurrency_light}
 API_MAX_CONCURRENT_POSITIONS=${max_concurrency_positions}
 API_MAX_CONCURRENT_TRANSACTIONS=${max_concurrency_transactions}

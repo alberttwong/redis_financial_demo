@@ -17,14 +17,22 @@ trap 'rm -f "$temporary_bundle"' EXIT
 
 tar -czf "$temporary_bundle" \
   --exclude './.git' \
+  --exclude './.DS_Store' \
   --exclude './.next' \
   --exclude './node_modules' \
+  --exclude './docs' \
   --exclude './memtier-output' \
   --exclude './monitor-input' \
+  --exclude './output' \
+  --exclude './tmp' \
   --exclude './infra/redis-cloud/.terraform' \
   --exclude './infra/redis-cloud/terraform.tfstate*' \
+  --exclude './infra/benchmark-backup/.terraform' \
+  --exclude './infra/benchmark-backup/terraform.tfstate*' \
+  --exclude './infra/benchmark-backup/tfplan*' \
   --exclude './infra/aws-load-runner/.terraform' \
   --exclude './infra/aws-load-runner/terraform.tfstate*' \
+  --exclude './infra/aws-load-runner/*.tfplan' \
   --exclude './infra/aws-load-runner/api-bundle.tgz' \
   -C "$ROOT_DIR" .
 

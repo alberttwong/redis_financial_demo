@@ -3,6 +3,32 @@ output "api_autoscaling_group_names" {
   value       = { for pool, group in aws_autoscaling_group.api : pool => group.name }
 }
 
+output "redis_oss_cluster_root_nodes" {
+  description = "Private Redis OSS Cluster root nodes used by cluster-aware clients."
+  value       = local.redis_cluster_root_nodes
+}
+
+output "redis_oss_cluster_password" {
+  description = "Temporary Redis OSS Cluster password."
+  value       = var.enable_redis_oss_cluster ? random_password.redis_oss[0].result : ""
+  sensitive   = true
+}
+
+output "redis_oss_cluster_instance_ids" {
+  description = "All temporary Redis OSS Cluster EC2 instance IDs."
+  value       = aws_instance.redis_oss[*].id
+}
+
+output "redis_oss_cluster_private_ips" {
+  description = "All temporary Redis OSS Cluster private IPs."
+  value       = aws_instance.redis_oss[*].private_ip
+}
+
+output "redis_oss_cluster_public_dns_names" {
+  description = "Management DNS names for temporary Redis OSS Cluster nodes."
+  value       = aws_instance.redis_oss[*].public_dns
+}
+
 output "api_target_group_arns" {
   description = "ALB target group ARN for each cost-isolated API pool."
   value       = { for pool, group in aws_lb_target_group.api : pool => group.arn }

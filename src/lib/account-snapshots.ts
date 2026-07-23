@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import type { RedisClientType } from "redis";
 import { jsonGet, jsonMGetFields, jsonSet } from "./json";
 import { accountKey, securityKey, snapshotKey } from "./keys";
 import { SECURITY_PROJECTION_FIELDS } from "./projections";
-import { positionsByAccount, transactionsSearch } from "./queries";
+import { positionsSearchByAccount, transactionsSearch } from "./queries";
+import type { RedisConnection } from "./redis";
 import type {
   AccountRow,
   AccountSnapshot,
@@ -13,7 +13,7 @@ import type {
 } from "./types";
 
 export async function rebuildAccountSnapshot(
-  client: RedisClientType,
+  client: RedisConnection,
   accountId: string,
   options: {
     account?: AccountRow;
@@ -28,7 +28,7 @@ export async function rebuildAccountSnapshot(
   }
 
   const [positions, transactions] = await Promise.all([
-    positionsByAccount({ client }, accountId),
+    positionsSearchByAccount({ client }, accountId),
     transactionsSearch({ client }, { accountId, limit: options.transactionLimit ?? 200 })
   ]);
   const securityByNo = await loadSecurityLookup(
@@ -68,7 +68,7 @@ export function snapshotPositionIndexKey(positionId: string): string {
 }
 
 async function loadSecurityLookup(
-  client: RedisClientType,
+  client: RedisConnection,
   rows: Array<Pick<PositionProjection | TransactionProjection, "security_id" | "security_no">>,
   provided?: ReadonlyMap<string, SecurityProjection>
 ): Promise<Map<string, SecurityProjection>> {

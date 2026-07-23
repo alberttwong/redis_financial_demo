@@ -1,8 +1,14 @@
-import type { RedisClientType } from "redis";
+import { sendRedisCommand, type RedisConnection } from "./redis";
 
 export type SearchKeysOptions = {
   limit?: number;
   offset?: number;
+  dialect?: 2 | 4;
+  sortBy?: {
+    field: string;
+    direction?: "ASC" | "DESC";
+    withoutCount?: boolean;
+  };
 };
 
 export type SearchProjectedResult<T> = {
@@ -11,14 +17,15 @@ export type SearchProjectedResult<T> = {
 };
 
 export async function searchKeys(
-  client: RedisClientType,
+  client: RedisConnection,
   index: string,
   query: string,
   options: SearchKeysOptions = {}
 ): Promise<{ total: number; keys: string[] }> {
   const offset = options.offset ?? 0;
   const limit = options.limit ?? 100;
-  const raw = await client.sendCommand([
+  const dialect = options.dialect ?? 2;
+  const raw = await sendRedisCommand(client, [
     "FT.SEARCH",
     index,
     query,
@@ -27,7 +34,7 @@ export async function searchKeys(
     String(offset),
     String(limit),
     "DIALECT",
-    "2"
+    String(dialect)
   ]);
 
   if (!Array.isArray(raw)) return { total: 0, keys: [] };
@@ -39,7 +46,7 @@ export async function searchKeys(
 }
 
 export async function searchProjected<T extends object>(
-  client: RedisClientType,
+  client: RedisConnection,
   index: string,
   query: string,
   fields: readonly (keyof T & string)[],
@@ -49,19 +56,29 @@ export async function searchProjected<T extends object>(
 
   const offset = options.offset ?? 0;
   const limit = options.limit ?? 100;
+  const dialect = options.dialect ?? 2;
   const returnArguments = fields.flatMap((field) => [`$.${field}`, "AS", field]);
-  const raw = await client.sendCommand([
+  const sortArguments = options.sortBy
+    ? [
+        "SORTBY",
+        options.sortBy.field,
+        options.sortBy.direction ?? "ASC",
+        ...(options.sortBy.withoutCount ? ["WITHOUTCOUNT"] : [])
+      ]
+    : [];
+  const raw = await sendRedisCommand(client, [
     "FT.SEARCH",
     index,
     query,
     "RETURN",
     String(returnArguments.length),
     ...returnArguments,
+    ...sortArguments,
     "LIMIT",
     String(offset),
     String(limit),
     "DIALECT",
-    "2"
+    String(dialect)
   ]);
 
   return parseProjectedSearchReply<T>(raw, fields);

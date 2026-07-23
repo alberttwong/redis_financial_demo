@@ -1,10 +1,14 @@
-import { createIndexes } from "../src/lib/indexes";
+import { getSeedConfig } from "../src/lib/config";
+import { createIndexes, waitForIndexesReady } from "../src/lib/indexes";
 import { closeRedisClient, getRedisClient } from "../src/lib/redis";
 
 async function main() {
   const client = await getRedisClient();
   const results = await createIndexes(client);
   for (const result of results) {
+    console.log(result);
+  }
+  for (const result of await waitForIndexesReady(client, getSeedConfig().indexTimeoutMs)) {
     console.log(result);
   }
 }

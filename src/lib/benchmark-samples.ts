@@ -1,5 +1,5 @@
-import type { RedisClientType } from "redis";
 import { INDEXES } from "./indexes";
+import type { RedisConnection } from "./redis";
 import { searchKeys, searchProjected } from "./search";
 
 export const QUERY_PATTERNS = [
@@ -56,7 +56,7 @@ const TRANSACTION_SAMPLE_FIELDS = [
 ] as const;
 
 export async function loadBenchmarkSamplePool(
-  client: RedisClientType,
+  client: RedisConnection,
   count: number
 ): Promise<BenchmarkSamplePool> {
   const limit = Math.max(1, Math.min(5_000, Math.floor(count)));
@@ -78,7 +78,7 @@ export async function loadBenchmarkSamplePool(
 }
 
 export async function loadBenchmarkAccountIds(
-  client: RedisClientType,
+  client: RedisConnection,
   count: number
 ): Promise<string[]> {
   const limit = Math.max(1, Math.min(5_000, Math.floor(count)));
@@ -118,9 +118,11 @@ export function selectQuerySample(
     }
     case "transactionById":
     case "transactionsByComposite":
-    case "transactionsByAccount":
     case "transactionsBySecurity":
     case "transactionsByAccountSecurity":
+      return base;
+    case "transactionsByAccount":
+      base.account_id = choose(pool.accounts, random);
       return base;
   }
 }

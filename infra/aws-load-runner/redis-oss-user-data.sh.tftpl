@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+dnf update -y
+dnf install -y docker jq
+systemctl enable --now docker
+
+sysctl -w vm.overcommit_memory=1
+sysctl -w net.core.somaxconn=65535
+echo never >/sys/kernel/mm/transparent_hugepage/enabled || true
+
+token="$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' http://169.254.169.254/latest/api/token)"
+private_ip="$(curl -fsS -H "X-aws-ec2-metadata-token: $token" http://169.254.169.254/latest/meta-data/local-ipv4)"
+
+install -d -m 700 /etc/redis-oss
+install -d -m 700 -o 999 -g 999 /var/lib/redis-oss
+cat >/etc/redis-oss/redis.conf <<EOF
+bind 0.0.0.0
+protected-mode yes
+port 6379
+tcp-backlog 65535
+timeout 0
+tcp-keepalive 60
+daemonize no
+supervised no
+loglevel notice
+databases 1
+save ""
+appendonly no
+cluster-enabled yes
+cluster-config-file /data/nodes.conf
+cluster-node-timeout 5000
+cluster-require-full-coverage yes
+cluster-announce-ip $private_ip
+cluster-announce-port 6379
+cluster-announce-bus-port 16379
+requirepass ${redis_password}
+masterauth ${redis_password}
+io-threads 8
+EOF
+chmod 644 /etc/redis-oss/redis.conf
+
+docker pull ${redis_docker_image}
+docker run -d \
+  --name redis-oss \
+  --restart unless-stopped \
+  --network host \
+  -e SKIP_FIX_PERMS=1 \
+  --ulimit nofile=1048576:1048576 \
+  -v /etc/redis-oss/redis.conf:/usr/local/etc/redis/redis.conf:ro \
+  -v /var/lib/redis-oss:/data \
+  ${redis_docker_image} \
+  redis-server /usr/local/etc/redis/redis.conf --search-workers 7
+
+for _ in $(seq 1 120); do
+  if docker exec redis-oss redis-cli -a '${redis_password}' ping | grep -q PONG; then
+    docker exec redis-oss redis-cli -a '${redis_password}' module list
+    touch /opt/redis-oss-node-ready
+    exit 0
+  fi
+  sleep 2
+done
+
+docker logs redis-oss
+exit 1

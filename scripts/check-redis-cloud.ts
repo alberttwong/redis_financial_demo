@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { createIndexes } from "../src/lib/indexes";
 import { jsonGet, jsonSet } from "../src/lib/json";
-import { closeRedisClient, getRedisClient } from "../src/lib/redis";
+import { closeRedisClient, getRedisClient, sendRedisCommand } from "../src/lib/redis";
 
 async function main() {
   const client = await getRedisClient();
-  const info = await client.sendCommand(["INFO", "server"]);
+  const info = await sendRedisCommand(client, ["INFO", "server"]);
   const version = typeof info === "string" ? info.match(/redis_version:([^\r\n]+)/)?.[1] : undefined;
   console.log(`Connected to Redis Cloud${version ? `, Redis ${version}` : ""}`);
 
@@ -16,7 +16,7 @@ async function main() {
   if (!probe?.ok) {
     throw new Error("JSON.SET/JSON.GET probe failed");
   }
-  await client.del(probeKey);
+  await sendRedisCommand(client, ["DEL", probeKey]);
   console.log("JSON.SET/JSON.GET: ok");
 
   const results = await createIndexes(client);

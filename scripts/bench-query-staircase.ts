@@ -57,6 +57,8 @@ async function main() {
   const maxErrorRate = readNonNegativeRatio("QUERY_STAIRCASE_MAX_ERROR_RATE", 0.001);
   const minAchievementRatio = readRatio("QUERY_STAIRCASE_MIN_ACHIEVEMENT_RATIO", 0.98);
   const headroomFactor = readPositiveNumber("QUERY_STAIRCASE_HEADROOM_FACTOR", 1.3);
+  const expectedPayloadBytes = readNonNegativeNumber("QUERY_STAIRCASE_EXPECTED_PAYLOAD_BYTES", 0);
+  const payloadTolerance = readNonNegativeRatio("QUERY_STAIRCASE_PAYLOAD_TOLERANCE", 0.05);
   if (headroomFactor < 1) {
     throw new Error("QUERY_STAIRCASE_HEADROOM_FACTOR must be at least one.");
   }
@@ -85,6 +87,9 @@ async function main() {
     }
 
     const achievementRatio = result.target_rps === 0 ? 0 : result.achieved_rps / result.target_rps;
+    const measuredPayloadBytes = result.average_api_payload_bytes ?? 0;
+    const minimumPayloadBytes = expectedPayloadBytes * (1 - payloadTolerance);
+    const maximumPayloadBytes = expectedPayloadBytes * (1 + payloadTolerance);
     const failureReasons = [
       ...(result.dropped_requests > 0 ? [`${result.dropped_requests} scheduler drops`] : []),
       ...(result.error_rate > maxErrorRate
@@ -95,6 +100,12 @@ async function main() {
         : []),
       ...(result.latency_ms.p95 > p95SloMs
         ? [`p95 ${format(result.latency_ms.p95)}ms exceeds ${format(p95SloMs)}ms`]
+        : []),
+      ...(expectedPayloadBytes > 0 &&
+      (measuredPayloadBytes < minimumPayloadBytes || measuredPayloadBytes > maximumPayloadBytes)
+        ? [
+            `payload ${format(measuredPayloadBytes)} bytes is outside ${format(minimumPayloadBytes)}-${format(maximumPayloadBytes)} bytes`
+          ]
         : [])
     ];
     const step: StaircaseStep = {
@@ -107,7 +118,7 @@ async function main() {
       socket_queue_p95_ms: result.socket_queue_ms?.p95 ?? 0,
       error_rate: result.error_rate,
       dropped_requests: result.dropped_requests,
-      average_api_payload_bytes: result.average_api_payload_bytes ?? 0,
+      average_api_payload_bytes: measuredPayloadBytes,
       successful_response_megabytes_per_second:
         result.successful_response_megabytes_per_second ?? 0,
       passed: failureReasons.length === 0,
@@ -133,7 +144,9 @@ async function main() {
       p95_slo_ms: p95SloMs,
       max_error_rate: maxErrorRate,
       min_achievement_ratio: minAchievementRatio,
-      capacity_headroom_factor: headroomFactor
+      capacity_headroom_factor: headroomFactor,
+      expected_payload_bytes: expectedPayloadBytes,
+      payload_tolerance: payloadTolerance
     },
     validated_aggregate_rps: validatedAggregateRps,
     validated_rps_per_target: validatedRpsPerTarget,

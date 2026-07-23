@@ -1,6 +1,14 @@
 locals {
   public_subnet_ids = sort(data.aws_subnets.default_public.ids)
   api_subnet_ids    = var.subnet_id == null ? local.public_subnet_ids : [var.subnet_id]
+  redis_cluster_node_count = (
+    var.enable_redis_oss_cluster
+    ? var.redis_cluster_primary_count * (1 + var.redis_cluster_replicas_per_primary)
+    : 0
+  )
+  redis_cluster_root_nodes = join(",", [
+    for instance in aws_instance.redis_oss : "redis://${instance.private_ip}:6379"
+  ])
   api_pattern_pool = {
     positionsByAccount     = "positions"
     transactionsByAccount  = "transactions"
@@ -55,6 +63,140 @@ data "aws_ami" "al2023" {
     name   = "virtualization-type"
     values = ["hvm"]
   }
+}
+
+resource "random_password" "redis_oss" {
+  count   = var.enable_redis_oss_cluster ? 1 : 0
+  length  = 32
+  special = false
+}
+
+resource "aws_security_group" "redis_oss" {
+  count       = var.enable_redis_oss_cluster ? 1 : 0
+  name        = "${var.name_prefix}-redis-oss-sg"
+  description = "Private Redis OSS Cluster client and cluster-bus access."
+  vpc_id      = data.aws_vpc.default.id
+  tags = merge(local.tags, {
+    Role = "redis-oss-cluster"
+  })
+}
+
+resource "aws_vpc_security_group_ingress_rule" "redis_oss_ssh" {
+  for_each = var.enable_redis_oss_cluster ? toset(var.ssh_ingress_cidr_blocks) : toset([])
+
+  security_group_id = aws_security_group.redis_oss[0].id
+  cidr_ipv4         = each.value
+  from_port         = 22
+  ip_protocol       = "tcp"
+  to_port           = 22
+  description       = "SSH bootstrap access from the benchmark operator"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "redis_oss_client" {
+  count = var.enable_redis_oss_cluster ? 1 : 0
+
+  security_group_id            = aws_security_group.redis_oss[0].id
+  referenced_security_group_id = aws_security_group.runner.id
+  from_port                    = 6379
+  ip_protocol                  = "tcp"
+  to_port                      = 6379
+  description                  = "Redis clients on API and generator hosts"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "redis_oss_node_ports" {
+  count = var.enable_redis_oss_cluster ? 1 : 0
+
+  security_group_id            = aws_security_group.redis_oss[0].id
+  referenced_security_group_id = aws_security_group.redis_oss[0].id
+  from_port                    = 6379
+  ip_protocol                  = "tcp"
+  to_port                      = 16379
+  description                  = "Redis client and cluster-bus traffic between cluster nodes"
+}
+
+resource "aws_vpc_security_group_egress_rule" "redis_oss_all" {
+  count = var.enable_redis_oss_cluster ? 1 : 0
+
+  security_group_id = aws_security_group.redis_oss[0].id
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "-1"
+  description       = "Package and official Redis image downloads"
+}
+
+resource "aws_instance" "redis_oss" {
+  count                       = local.redis_cluster_node_count
+  ami                         = data.aws_ami.al2023.id
+  instance_type               = var.redis_cluster_instance_type
+  subnet_id                   = coalesce(var.subnet_id, element(local.public_subnet_ids, count.index % length(local.public_subnet_ids)))
+  associate_public_ip_address = true
+  key_name                    = var.key_name
+  vpc_security_group_ids      = [aws_security_group.redis_oss[0].id]
+  monitoring                  = true
+  # User-data fixes can be reconciled without discarding a populated cluster.
+  user_data_replace_on_change = false
+  user_data = templatefile("${path.module}/redis-oss-user-data.sh.tftpl", {
+    redis_password     = random_password.redis_oss[0].result
+    redis_docker_image = var.redis_cluster_docker_image
+  })
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  root_block_device {
+    volume_size = 32
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  tags = merge(local.tags, {
+    Name = "${var.name_prefix}-redis-oss-${format("%02d", count.index + 1)}"
+    Role = count.index < var.redis_cluster_primary_count ? "redis-oss-primary" : "redis-oss-replica"
+  })
+}
+
+resource "terraform_data" "redis_oss_cluster_bootstrap" {
+  count = var.enable_redis_oss_cluster ? 1 : 0
+
+  triggers_replace = [
+    join(",", aws_instance.redis_oss[*].id),
+    sha256(random_password.redis_oss[0].result),
+  ]
+
+  connection {
+    type        = "ssh"
+    host        = aws_instance.redis_oss[0].public_ip
+    user        = "ec2-user"
+    private_key = file(coalesce(var.ssh_private_key_path, "/dev/null"))
+    timeout     = "20m"
+  }
+
+  provisioner "remote-exec" {
+    inline = [
+      "for i in $(seq 1 120); do test -f /opt/redis-oss-node-ready && break; sleep 5; done",
+      "test -f /opt/redis-oss-node-ready",
+      "sudo docker exec redis-oss redis-cli -a '${random_password.redis_oss[0].result}' --cluster create ${join(" ", formatlist("%s:6379", aws_instance.redis_oss[*].private_ip))} --cluster-replicas ${var.redis_cluster_replicas_per_primary} --cluster-yes",
+      "for i in $(seq 1 120); do sudo docker exec redis-oss redis-cli -a '${random_password.redis_oss[0].result}' cluster info | grep -q 'cluster_state:ok' && break; sleep 5; done",
+      "sudo docker exec redis-oss redis-cli -a '${random_password.redis_oss[0].result}' cluster info | grep -q 'cluster_state:ok'",
+      "sudo touch /opt/redis-oss-cluster-ready",
+    ]
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.ssh_private_key_path != null && var.key_name != null && length(var.ssh_ingress_cidr_blocks) > 0
+      error_message = "Redis OSS Cluster bootstrap requires key_name, ssh_private_key_path, and at least one SSH ingress CIDR."
+    }
+  }
+
+  depends_on = [
+    aws_instance.redis_oss,
+    aws_vpc_security_group_egress_rule.redis_oss_all,
+    aws_vpc_security_group_ingress_rule.redis_oss_client,
+    aws_vpc_security_group_ingress_rule.redis_oss_node_ports,
+    aws_vpc_security_group_ingress_rule.redis_oss_ssh,
+  ]
 }
 
 resource "aws_s3_bucket" "deployment" {
@@ -268,6 +410,11 @@ resource "aws_launch_template" "api" {
     max_concurrency_portfolio    = var.api_pool_capacity["portfolio"].max_concurrency
     max_concurrency_activity     = var.api_pool_capacity["activity"].max_concurrency
     max_concurrency_snapshot     = var.api_pool_capacity["snapshot"].max_concurrency
+    redis_cluster_environment = var.enable_redis_oss_cluster ? join("\n", [
+      "REDIS_CLUSTER_ROOT_NODES=${local.redis_cluster_root_nodes}",
+      "REDIS_PASSWORD=${random_password.redis_oss[0].result}",
+      "REDIS_TLS=false",
+    ]) : ""
   }))
 
   tag_specifications {
@@ -286,7 +433,7 @@ resource "aws_launch_template" "api" {
 
   tags = local.tags
 
-  depends_on = [aws_s3_object.deployment_bundle]
+  depends_on = [aws_s3_object.deployment_bundle, terraform_data.redis_oss_cluster_bootstrap]
 }
 
 resource "aws_lb" "api" {
