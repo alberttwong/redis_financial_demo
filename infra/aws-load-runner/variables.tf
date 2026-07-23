@@ -4,6 +4,53 @@ variable "aws_region" {
   default     = "us-west-2"
 }
 
+variable "enable_redis_oss_cluster" {
+  description = "Provision a temporary Redis 8 OSS Cluster alongside the benchmark fleet."
+  type        = bool
+  default     = false
+}
+
+variable "redis_cluster_primary_count" {
+  description = "Number of Redis OSS Cluster primary shards."
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.redis_cluster_primary_count >= 3 && var.redis_cluster_primary_count <= 12
+    error_message = "redis_cluster_primary_count must be between 3 and 12."
+  }
+}
+
+variable "redis_cluster_replicas_per_primary" {
+  description = "Replica count for each Redis OSS Cluster primary. Use one for the benchmark HA topology."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.redis_cluster_replicas_per_primary >= 0 && var.redis_cluster_replicas_per_primary <= 2
+    error_message = "redis_cluster_replicas_per_primary must be between 0 and 2."
+  }
+}
+
+variable "redis_cluster_instance_type" {
+  description = "EC2 instance type for each Redis OSS Cluster node."
+  type        = string
+  default     = "r7i.4xlarge"
+}
+
+variable "redis_cluster_docker_image" {
+  description = "Official Redis image used by every OSS Cluster node."
+  type        = string
+  default     = "redis:8.4"
+}
+
+variable "ssh_private_key_path" {
+  description = "Local private-key path used only to bootstrap the temporary Redis OSS Cluster."
+  type        = string
+  default     = null
+  nullable    = true
+}
+
 variable "name_prefix" {
   description = "Name prefix for load-runner resources."
   type        = string

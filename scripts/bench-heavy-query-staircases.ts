@@ -2,6 +2,21 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+const ALL_PATTERNS = [
+  "accountById",
+  "securityById",
+  "securityByNo",
+  "positionByComposite",
+  "positionsByAccount",
+  "transactionById",
+  "transactionsByAccount",
+  "transactionsBySecurity",
+  "transactionsByAccountSecurity",
+  "accountPortfolioJoin",
+  "accountActivityJoin",
+  "accountSnapshot"
+] as const;
+
 const DEFAULT_PATTERNS = [
   "positionsByAccount",
   "transactionsByAccount",
@@ -9,13 +24,28 @@ const DEFAULT_PATTERNS = [
   "accountPortfolioJoin",
   "accountActivityJoin",
   "accountSnapshot"
-] as const;
+] as const satisfies readonly QueryPattern[];
 
-const ALLOWED_PATTERNS = new Set(DEFAULT_PATTERNS);
+const EXPECTED_PAYLOAD_BYTES: Record<QueryPattern, number> = {
+  accountById: 196.18,
+  securityById: 8192,
+  securityByNo: 332.37,
+  positionByComposite: 8192,
+  positionsByAccount: 119169.79,
+  transactionById: 8192,
+  transactionsByAccount: 33848,
+  transactionsBySecurity: 33844.66,
+  transactionsByAccountSecurity: 3126,
+  accountPortfolioJoin: 294033.19,
+  accountActivityJoin: 136833.38,
+  accountSnapshot: 430879.7
+};
 
-type HeavyPattern = (typeof DEFAULT_PATTERNS)[number];
+const ALLOWED_PATTERNS = new Set<string>(ALL_PATTERNS);
+
+type QueryPattern = (typeof ALL_PATTERNS)[number];
 type StaircaseSummary = {
-  pattern: HeavyPattern;
+  pattern: QueryPattern;
   target_count: number;
   validated_aggregate_rps: number;
   validated_rps_per_target: number;
@@ -24,7 +54,8 @@ type StaircaseSummary = {
 };
 
 async function main() {
-  const patterns = parsePatterns(process.env.QUERY_STAIRCASE_SUITE_PATTERNS);
+  const suiteName = process.env.QUERY_STAIRCASE_SUITE_NAME === "all" ? "all" : "heavy";
+  const patterns = parsePatterns(process.env.QUERY_STAIRCASE_SUITE_PATTERNS, suiteName);
   const targetCounts = parseTargetCounts(process.env.QUERY_STAIRCASE_TARGET_COUNTS_JSON);
   const rootDirectory = path.resolve(
     process.env.LOAD_TEST_OUTPUT_DIR ??
@@ -45,18 +76,19 @@ async function main() {
   }
 
   const aggregate = {
-    experiment: "isolated-heavy-query-staircase-suite",
+    experiment: `isolated-${suiteName}-query-staircase-suite`,
     base_url: process.env.QUERY_BASE_URL ?? "http://127.0.0.1:3000",
     patterns: summaries
   };
+  const summaryBaseName = suiteName === "all" ? "query-staircase-suite-summary" : "heavy-staircase-summary";
   await Promise.all([
-    writeFile(path.join(rootDirectory, "heavy-staircase-summary.json"), `${JSON.stringify(aggregate, null, 2)}\n`),
-    writeFile(path.join(rootDirectory, "heavy-staircase-summary.md"), renderMarkdown(summaries))
+    writeFile(path.join(rootDirectory, `${summaryBaseName}.json`), `${JSON.stringify(aggregate, null, 2)}\n`),
+    writeFile(path.join(rootDirectory, `${summaryBaseName}.md`), renderMarkdown(summaries, suiteName))
   ]);
-  console.log(`\nWrote heavy staircase suite to ${rootDirectory}`);
+  console.log(`\nWrote ${suiteName} staircase suite to ${rootDirectory}`);
 }
 
-function runStaircase(pattern: HeavyPattern, outputDirectory: string, targetCount: number): Promise<number> {
+function runStaircase(pattern: QueryPattern, outputDirectory: string, targetCount: number): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
@@ -67,6 +99,7 @@ function runStaircase(pattern: HeavyPattern, outputDirectory: string, targetCoun
           ...process.env,
           QUERY_STAIRCASE_PATTERN: pattern,
           QUERY_STAIRCASE_TARGET_COUNT: String(targetCount),
+          QUERY_STAIRCASE_EXPECTED_PAYLOAD_BYTES: String(EXPECTED_PAYLOAD_BYTES[pattern]),
           LOAD_TEST_OUTPUT_DIR: outputDirectory
         },
         stdio: "inherit"
@@ -80,41 +113,41 @@ function runStaircase(pattern: HeavyPattern, outputDirectory: string, targetCoun
   });
 }
 
-function parsePatterns(value: string | undefined): HeavyPattern[] {
-  if (!value?.trim()) return [...DEFAULT_PATTERNS];
+function parsePatterns(value: string | undefined, suiteName: "all" | "heavy"): QueryPattern[] {
+  if (!value?.trim()) return suiteName === "all" ? [...ALL_PATTERNS] : [...DEFAULT_PATTERNS];
   const patterns = [...new Set(value.split(",").map((entry) => entry.trim()).filter(Boolean))];
   if (patterns.length === 0) {
     throw new Error("QUERY_STAIRCASE_SUITE_PATTERNS must contain at least one pattern");
   }
-  const invalid = patterns.filter((pattern) => !ALLOWED_PATTERNS.has(pattern as HeavyPattern));
+  const invalid = patterns.filter((pattern) => !ALLOWED_PATTERNS.has(pattern));
   if (invalid.length > 0) {
     throw new Error(`QUERY_STAIRCASE_SUITE_PATTERNS contains unsupported patterns: ${invalid.join(", ")}`);
   }
-  return patterns as HeavyPattern[];
+  return patterns as QueryPattern[];
 }
 
-function parseTargetCounts(value: string | undefined): Partial<Record<HeavyPattern, number>> {
+function parseTargetCounts(value: string | undefined): Partial<Record<QueryPattern, number>> {
   if (!value?.trim()) return {};
   const parsed = JSON.parse(value) as unknown;
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("QUERY_STAIRCASE_TARGET_COUNTS_JSON must be a JSON object");
   }
-  const result: Partial<Record<HeavyPattern, number>> = {};
+  const result: Partial<Record<QueryPattern, number>> = {};
   for (const [pattern, count] of Object.entries(parsed as Record<string, unknown>)) {
-    if (!ALLOWED_PATTERNS.has(pattern as HeavyPattern)) {
+    if (!ALLOWED_PATTERNS.has(pattern)) {
       throw new Error(`QUERY_STAIRCASE_TARGET_COUNTS_JSON contains unsupported pattern ${pattern}`);
     }
     if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 1) {
       throw new Error(`Target count for ${pattern} must be a positive integer`);
     }
-    result[pattern as HeavyPattern] = count;
+    result[pattern as QueryPattern] = count;
   }
   return result;
 }
 
-function renderMarkdown(summaries: StaircaseSummary[]): string {
+function renderMarkdown(summaries: StaircaseSummary[], suiteName: "all" | "heavy"): string {
   const lines = [
-    "# Heavy Query Staircase Suite",
+    suiteName === "all" ? "# Complete Query Staircase Suite" : "# Heavy Query Staircase Suite",
     "",
     "| Pattern | Targets | Validated aggregate/sec | Validated/target/sec | Safe/target/sec | Suggested ALB target/min |",
     "|---|---:|---:|---:|---:|---:|",

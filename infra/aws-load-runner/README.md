@@ -112,6 +112,27 @@ Set `QUERY_ACCEPT_ENCODING=gzip` only if production clients request compressed r
 
 Distributed concurrent mode requires six or seven query generators plus the dedicated trade generators. With the default nine hosts it uses two generators for the light pool, one for each heavyweight pool, and two for writes. Query keys and trade-write accounts remain randomized and sharded. The runner always synchronizes the workload client to every generator and installs generator dependencies in parallel, including when API reuse mode is enabled.
 
+### Reusable seeded dataset
+
+Keep the 2 TB-class seed outside the disposable runner lifecycle by applying
+`infra/benchmark-backup` once. Then set:
+
+```sh
+AWS_LOAD_RUNNER_DATASET_MODE=auto
+AWS_LOAD_RUNNER_SEED_PARTITIONS=8
+```
+
+`auto` uses the latest complete S3 manifest when it exists. On the first run it
+uses eight generator hosts for deterministic, Redis-checkpointed partitions,
+finalizes indexes and snapshots, then exports one RDB per Redis Cloud shard. On
+subsequent runs it imports all shard files and reloads indexes/functions before
+the benchmark. `seed`, `restore`, and `none` are the explicit alternatives.
+The legacy `AWS_LOAD_RUNNER_SEED_INITIAL_LOAD=1` setting now maps to `auto`.
+
+Set `AWS_LOAD_RUNNER_SEED_RESET_CHECKPOINTS=1` only to discard an incomplete
+run's resume points. The retained backup stack has separate Terraform state and
+is intentionally excluded from the destroy command below.
+
 The runner records:
 
 - Target/sec and successful achieved/sec per query.
@@ -152,6 +173,20 @@ npm run bench:aws-runner
 
 The runner passes the Terraform target count for each routed pool so the suite rollup reports aggregate and per-target rates correctly.
 
+Run all 12 query patterns sequentially, including every member of the shared light pool, with:
+
+```bash
+AWS_LOAD_RUNNER_BENCHMARK=staircaseSuite \
+QUERY_STAIRCASE_SUITE_NAME=all \
+QUERY_STAIRCASE_RATES=250,500,1000,2000,4000,8000,12000 \
+QUERY_WARMUP_TIME=5 \
+LOAD_TEST_OUTPUT_DIR=memtier-output/query-staircase-suite-$(date -u +%Y%m%dT%H%M%SZ) \
+AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem \
+npm run bench:aws-runner
+```
+
+The complete suite validates every measured payload against the last known full-payload baseline with a default tolerance of 5%. A payload mismatch stops that pattern and prevents a smaller response from being recorded as capacity.
+
 ```text
 instances = ceil(target pool RPS / validated RPS per target * 1.30)
 ```
@@ -174,4 +209,4 @@ terraform destroy \
   -var='ssh_ingress_cidr_blocks=["<your-public-ip>/32"]'
 ```
 
-The API groups, generators, ALB, deployment bucket and object versions, IAM resources, and security groups remain billable until destruction completes.
+The API groups, generators, ALB, deployment bucket and object versions, IAM resources, and security groups remain billable until destruction completes. The separate `infra/benchmark-backup` bucket and its RDB objects remain available for later runs.

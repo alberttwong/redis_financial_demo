@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { createClient } from "redis";
-import { getRedisConfig } from "../src/lib/config";
+import { createRedisConnection, isRedisCluster, redisClusterMasters } from "../src/lib/redis";
 
 const METRIC_FIELDS = [
   "used_memory",
@@ -11,41 +10,45 @@ const METRIC_FIELDS = [
   "instantaneous_ops_per_sec",
   "instantaneous_input_kbps",
   "instantaneous_output_kbps",
+  "total_net_input_bytes",
+  "total_net_output_bytes",
   "total_commands_processed",
   "keyspace_hits",
-  "keyspace_misses"
+  "keyspace_misses",
+  "used_cpu_sys",
+  "used_cpu_user"
 ] as const;
 
 async function main() {
   const label = sanitizeLabel(process.argv[2] ?? "snapshot");
-  const config = getRedisConfig();
-  const client = createClient({
-    url: config.url,
-    username: config.username,
-    password: config.password,
-    socket: {
-      tls: config.tls,
-      connectTimeout: 10_000
-    }
-  });
-  client.on("error", (error) => console.error("Redis metrics client error", error));
-
-  await client.connect();
-  const rawInfo = await client.sendCommand(["INFO", "ALL"]);
+  const client = await createRedisConnection();
+  const nodes = isRedisCluster(client)
+    ? await Promise.all(
+        redisClusterMasters(client).map(async (master) => {
+          const node = await client.nodeClient(master);
+          const rawInfo = await node.sendCommand(["INFO", "ALL"]);
+          return metricNode(master.id, master.address, rawInfo);
+        })
+      )
+    : [metricNode("standalone", "configured-endpoint", await client.sendCommand(["INFO", "ALL"]))];
   await client.quit();
-  if (typeof rawInfo !== "string") throw new Error("Redis INFO returned an unexpected response");
-
-  const fields = parseInfo(rawInfo);
+  const infoScope = usesDatabaseGlobalInfo(nodes) ? "database-global" : "per-primary";
+  const aggregation = infoScope === "database-global" ? "representative" : "sum";
   const metrics = Object.fromEntries(
-    METRIC_FIELDS.map((name) => [name, numericValue(fields[name])])
+    METRIC_FIELDS.map((name) => [name, aggregation === "representative" ? nodes[0][name] : sum(nodes.map((node) => node[name]))])
   );
   const hits = metrics.keyspace_hits;
   const misses = metrics.keyspace_misses;
   const output = {
     label,
     captured_at: new Date().toISOString(),
+    topology: nodes.length > 1 ? "cluster" : "standalone",
+    primary_count: nodes.length,
+    info_scope: infoScope,
+    aggregation,
     ...metrics,
-    keyspace_hit_ratio: hits + misses === 0 ? 0 : round(hits / (hits + misses))
+    keyspace_hit_ratio: hits + misses === 0 ? 0 : round(hits / (hits + misses)),
+    nodes
   };
 
   const outputDirectory = process.env.LOAD_TEST_OUTPUT_DIR ?? "memtier-output";
@@ -54,6 +57,27 @@ async function main() {
   await writeFile(outputPath, JSON.stringify(output, null, 2) + "\n");
   console.log(JSON.stringify(output, null, 2));
   console.log(`Wrote ${outputPath}`);
+}
+
+function usesDatabaseGlobalInfo(nodes: Array<ReturnType<typeof metricNode>>): boolean {
+  if (nodes.length < 2) return false;
+  const representative = nodes[0];
+  return nodes.slice(1).every(
+    (node) =>
+      node.total_commands_processed === representative.total_commands_processed &&
+      node.keyspace_hits === representative.keyspace_hits &&
+      node.keyspace_misses === representative.keyspace_misses
+  );
+}
+
+function metricNode(id: string, address: string, rawInfo: unknown) {
+  if (typeof rawInfo !== "string") throw new Error("Redis INFO returned an unexpected response");
+  const fields = parseInfo(rawInfo);
+  const metrics = Object.fromEntries(METRIC_FIELDS.map((name) => [name, numericValue(fields[name])])) as Record<
+    (typeof METRIC_FIELDS)[number],
+    number
+  >;
+  return { id, address, ...metrics };
 }
 
 function parseInfo(rawInfo: string): Record<string, string> {
@@ -78,6 +102,10 @@ function sanitizeLabel(value: string): string {
 
 function round(value: number): number {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function sum(values: number[]): number {
+  return values.reduce((total, value) => total + value, 0);
 }
 
 main().catch((error) => {

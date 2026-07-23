@@ -1,4 +1,4 @@
-import type { RedisClientType } from "redis";
+import { sendRedisCommand, type RedisConnection } from "./redis";
 
 export const INDEXES = {
   accounts: "idx:accounts",
@@ -122,19 +122,19 @@ const INDEX_COMMANDS: string[][] = [
   ]
 ];
 
-export async function createIndexes(client: RedisClientType): Promise<string[]> {
+export async function createIndexes(client: RedisConnection): Promise<string[]> {
   const results: string[] = [];
   for (const command of INDEX_COMMANDS) {
     try {
-      await client.sendCommand(command);
+      await sendRedisCommand(client, command);
       results.push(`${command[1]}: created`);
     } catch (error) {
       if (error instanceof Error && error.message.includes("Index already exists")) {
         const expectedPrefix = commandPrefix(command);
         const currentPrefixes = await indexPrefixes(client, command[1]);
         if (expectedPrefix && currentPrefixes.length > 0 && !currentPrefixes.includes(expectedPrefix)) {
-          await client.sendCommand(["FT.DROPINDEX", command[1]]);
-          await client.sendCommand(command);
+          await sendRedisCommand(client, ["FT.DROPINDEX", command[1]]);
+          await sendRedisCommand(client, command);
           results.push(`${command[1]}: recreated with prefix ${expectedPrefix}`);
           continue;
         }
@@ -148,14 +148,17 @@ export async function createIndexes(client: RedisClientType): Promise<string[]> 
   return results;
 }
 
-export async function dropIndexes(client: RedisClientType): Promise<string[]> {
+export async function dropIndexes(client: RedisConnection): Promise<string[]> {
   const results: string[] = [];
   for (const indexName of Object.values(INDEXES)) {
     try {
-      await client.sendCommand(["FT.DROPINDEX", indexName]);
+      await sendRedisCommand(client, ["FT.DROPINDEX", indexName]);
       results.push(`${indexName}: dropped`);
     } catch (error) {
-      if (error instanceof Error && error.message.includes("Unknown Index name")) {
+      if (
+        error instanceof Error &&
+        (error.message.includes("Unknown Index name") || error.message.toLowerCase().includes("no such index"))
+      ) {
         results.push(`${indexName}: missing`);
         continue;
       }
@@ -163,6 +166,36 @@ export async function dropIndexes(client: RedisClientType): Promise<string[]> {
     }
   }
   return results;
+}
+
+export async function waitForIndexesReady(
+  client: RedisConnection,
+  timeoutMs = 20 * 60_000,
+  pollIntervalMs = 2_000
+): Promise<string[]> {
+  const pending = new Set(Object.values(INDEXES));
+  const ready: string[] = [];
+  const deadline = Date.now() + timeoutMs;
+
+  while (pending.size > 0) {
+    for (const indexName of pending) {
+      const info = await sendRedisCommand(client, ["FT.INFO", indexName]);
+      const indexing = Number(alternatingValue(info, "indexing") ?? 1);
+      const percentIndexed = Number(alternatingValue(info, "percent_indexed") ?? 0);
+      if (indexing === 0 && percentIndexed >= 1) {
+        pending.delete(indexName);
+        ready.push(`${indexName}: ready`);
+      }
+    }
+
+    if (pending.size === 0) return ready;
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for index backfill: ${[...pending].join(", ")}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  return ready;
 }
 
 export function indexCommandShapes(): string[] {
@@ -177,8 +210,8 @@ function commandPrefix(command: string[]): string | null {
   return command[prefixIndex + 2] ?? null;
 }
 
-async function indexPrefixes(client: RedisClientType, indexName: string): Promise<string[]> {
-  const info = await client.sendCommand(["FT.INFO", indexName]);
+async function indexPrefixes(client: RedisConnection, indexName: string): Promise<string[]> {
+  const info = await sendRedisCommand(client, ["FT.INFO", indexName]);
   const indexDefinition = alternatingValue(info, "index_definition");
   return extractPrefixes(indexDefinition) ?? extractPrefixes(info) ?? [];
 }

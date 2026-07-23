@@ -63,6 +63,14 @@ test("pattern-aware samples preserve composite-key identity", () => {
   assert.deepEqual(transaction, pool.transactions[1]);
 });
 
+test("transactions by account samples from the independent account pool", () => {
+  const choices = [0, 0.99];
+  const transaction = selectQuerySample(pool, "transactionsByAccount", () => choices.shift() ?? 0);
+
+  assert.equal(transaction.account_id, "A2");
+  assert.equal(transaction.transaction_id, "T1");
+});
+
 test("the workbench-compatible first sample comes from a real transaction", () => {
   assert.deepEqual(firstQuerySample(pool), pool.transactions[0]);
 });

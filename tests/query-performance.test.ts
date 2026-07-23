@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RedisClientType } from "redis";
-import { accountActivityJoin, accountPortfolioJoin } from "../src/lib/queries";
+import {
+  accountActivityJoin,
+  accountPortfolioJoin,
+  positionsByAccount,
+  transactionsByAccount
+} from "../src/lib/queries";
 import type {
   AccountRow,
   PositionProjection,
@@ -130,4 +135,47 @@ test("accountActivityJoin reads the current materialized projection with one com
   assert.equal(result.redis_command_count, 1);
   assert.equal(result.result_count, 1);
   assert.deepEqual(result.data, { account, transactions });
+});
+
+test("positionsByAccount uses the immediately-current snapshot and preserves the compact response shape", async () => {
+  const commands: string[][] = [];
+  const client = {
+    async sendCommand(input: string[]) {
+      commands.push(input);
+      return projectedReply({ position_count: positions.length, positions });
+    }
+  } as unknown as RedisClientType;
+
+  const result = await positionsByAccount({ client }, "A1");
+
+  assert.deepEqual(commands, [[
+    "JSON.GET",
+    "acct-snapshot:{acct:A1}",
+    "$.position_count",
+    "$.positions"
+  ]]);
+  assert.equal(result.redis_command_count, 1);
+  assert.equal(result.result_count, 1);
+  assert.deepEqual(result.data, positions.map(({ security: _security, ...position }) => position));
+});
+
+test("transactionsByAccount uses the bounded recent snapshot and preserves the compact response shape", async () => {
+  const commands: string[][] = [];
+  const client = {
+    async sendCommand(input: string[]) {
+      commands.push(input);
+      return projectedReply({ recent_transactions: transactions });
+    }
+  } as unknown as RedisClientType;
+
+  const result = await transactionsByAccount({ client }, "A1", 100);
+
+  assert.deepEqual(commands, [[
+    "JSON.GET",
+    "acct-snapshot:{acct:A1}",
+    "$.recent_transactions"
+  ]]);
+  assert.equal(result.redis_command_count, 1);
+  assert.equal(result.result_count, 1);
+  assert.deepEqual(result.data, transactions.map(({ security: _security, ...transaction }) => transaction));
 });

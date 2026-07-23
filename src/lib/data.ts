@@ -8,6 +8,7 @@ import {
   transactionKey
 } from "./keys";
 import { withSizedPayload } from "./payload";
+import { deterministicFloat, deterministicIndex } from "./seed-partition";
 import { makeSp500Template } from "./sp500";
 import type { AccountRow, PositionRow, SecurityRow, TransactionRow } from "./types";
 
@@ -63,10 +64,21 @@ export function makeSecurity(index: number, targetBytes: number): SecurityRow {
   );
 }
 
-export function makePosition(account: AccountRef, security: PositionSecurityRef, targetBytes: number): PositionRow {
-  const acctTypeCode = faker.helpers.arrayElement(acctTypeCodes);
-  const quantity = faker.number.float({ min: 1, max: 4_000, fractionDigits: 4 });
-  const marketValue = faker.number.float({ min: 500, max: 750_000, fractionDigits: 2 });
+export function makePosition(
+  account: AccountRef,
+  security: PositionSecurityRef,
+  targetBytes: number,
+  deterministic?: { randomSeed: number; rowIndex: number; asOfDate: string }
+): PositionRow {
+  const acctTypeCode = deterministic
+    ? acctTypeCodes[deterministicIndex(deterministic.randomSeed, deterministic.rowIndex, 0x13579bdf, acctTypeCodes.length)]
+    : faker.helpers.arrayElement(acctTypeCodes);
+  const quantity = deterministic
+    ? deterministicFloat(deterministic.randomSeed, deterministic.rowIndex, 0x2468ace0, 1, 4_000, 4)
+    : faker.number.float({ min: 1, max: 4_000, fractionDigits: 4 });
+  const marketValue = deterministic
+    ? deterministicFloat(deterministic.randomSeed, deterministic.rowIndex, 0x5a5a5a5a, 500, 750_000, 2)
+    : faker.number.float({ min: 500, max: 750_000, fractionDigits: 2 });
   const id = positionId(account.account_id, security.security_no, acctTypeCode);
 
   return withSizedPayload(
@@ -78,7 +90,7 @@ export function makePosition(account: AccountRef, security: PositionSecurityRef,
       acct_type_code: acctTypeCode,
       quantity,
       market_value: marketValue,
-      as_of_date: new Date().toISOString().slice(0, 10),
+      as_of_date: deterministic?.asOfDate ?? new Date().toISOString().slice(0, 10),
       projection_version: 0
     },
     targetBytes
@@ -116,13 +128,18 @@ export function makeTransactionForSequence(
   security: TransactionSecurityRef,
   sequence: number,
   securityCount: number,
-  targetBytes: number
+  targetBytes: number,
+  deterministic?: { randomSeed: number; rowIndex: number }
 ): TransactionRow {
   const acctTypeCode = acctTypeCodes[sequence % acctTypeCodes.length];
   const dateOffset = Math.floor(sequence / securityCount);
   const tradeDate = new Date(Date.UTC(2026, 0, 1 - dateOffset)).toISOString().slice(0, 10);
-  const quantity = faker.number.float({ min: 0.01, max: 2_000, fractionDigits: 4 });
-  const amount = faker.number.float({ min: 10, max: 250_000, fractionDigits: 2 });
+  const quantity = deterministic
+    ? deterministicFloat(deterministic.randomSeed, deterministic.rowIndex, 0x31415926, 0.01, 2_000, 4)
+    : faker.number.float({ min: 0.01, max: 2_000, fractionDigits: 4 });
+  const amount = deterministic
+    ? deterministicFloat(deterministic.randomSeed, deterministic.rowIndex, 0x27182818, 10, 250_000, 2)
+    : faker.number.float({ min: 10, max: 250_000, fractionDigits: 2 });
   const transactionId = `SEED-${account.account_id}-${String(sequence).padStart(12, "0")}`;
   const id = transactionDocumentId(account.account_id, security.security_id, transactionId);
 

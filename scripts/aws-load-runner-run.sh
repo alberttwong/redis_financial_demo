@@ -12,9 +12,17 @@ API_KEEP_ALIVE_TIMEOUT="${API_KEEP_ALIVE_TIMEOUT:-65000}"
 QUERY_GENERATOR_PROCESSES="${QUERY_GENERATOR_PROCESSES:-1}"
 QUERY_GENERATOR_MODE="${QUERY_GENERATOR_MODE:-single-host}"
 REUSE_HOSTS="${AWS_LOAD_RUNNER_REUSE_HOSTS:-1}"
+SKIP_BUNDLE_PUBLISH="${AWS_LOAD_RUNNER_SKIP_BUNDLE_PUBLISH:-0}"
+SKIP_GENERATOR_SYNC="${AWS_LOAD_RUNNER_SKIP_GENERATOR_SYNC:-0}"
+SEED_INITIAL_LOAD="${AWS_LOAD_RUNNER_SEED_INITIAL_LOAD:-0}"
+DATASET_MODE="${AWS_LOAD_RUNNER_DATASET_MODE:-none}"
+SEED_PARTITIONS="${AWS_LOAD_RUNNER_SEED_PARTITIONS:-8}"
+SEED_RESET_CHECKPOINTS="${AWS_LOAD_RUNNER_SEED_RESET_CHECKPOINTS:-0}"
 AWS_REGION="${AWS_REGION:-us-west-2}"
 HOST_READY_TIMEOUT_SECONDS="${AWS_LOAD_RUNNER_HOST_READY_TIMEOUT_SECONDS:-1200}"
 API_READY_TIMEOUT_SECONDS="${AWS_LOAD_RUNNER_API_READY_TIMEOUT_SECONDS:-900}"
+API_ARTIFACT_TIMEOUT_SECONDS="${AWS_LOAD_RUNNER_API_ARTIFACT_TIMEOUT_SECONDS:-30}"
+COLLECT_API_ARTIFACTS="${AWS_LOAD_RUNNER_COLLECT_API_ARTIFACTS:-1}"
 DEFAULT_ACCOUNT_BY_ID_TARGET_RPS=10000
 DEFAULT_STANDARD_QUERY_TARGET_RPS=9000
 DEFAULT_JOIN_QUERY_TARGET_RPS=45000
@@ -37,6 +45,11 @@ fi
 API_POOL_CAPACITY_JSON="$(terraform -chdir="$TF_DIR" output -json api_pool_capacity)"
 API_ASG_NAMES_JSON="$(terraform -chdir="$TF_DIR" output -json api_autoscaling_group_names)"
 API_TARGET_GROUP_ARNS_JSON="$(terraform -chdir="$TF_DIR" output -json api_target_group_arns)"
+REDIS_CLUSTER_ROOT_NODES="$(terraform -chdir="$TF_DIR" output -raw redis_oss_cluster_root_nodes)"
+REDIS_CLUSTER_PASSWORD=""
+if [[ -n "$REDIS_CLUSTER_ROOT_NODES" ]]; then
+  REDIS_CLUSTER_PASSWORD="$(terraform -chdir="$TF_DIR" output -raw redis_oss_cluster_password)"
+fi
 HEAVY_STAIRCASE_TARGET_COUNTS_JSON="$(jq -c '{
   positionsByAccount: .positions.desired_capacity,
   transactionsByAccount: .transactions.desired_capacity,
@@ -51,7 +64,6 @@ STAIRCASE_TARGET_COUNTS_JSON="$(jq -c '{
   securityByNo: .light.desired_capacity,
   positionByComposite: .light.desired_capacity,
   transactionById: .light.desired_capacity,
-  transactionsByComposite: .light.desired_capacity,
   transactionsByAccountSecurity: .light.desired_capacity,
   positionsByAccount: .positions.desired_capacity,
   transactionsByAccount: .transactions.desired_capacity,
@@ -61,6 +73,10 @@ STAIRCASE_TARGET_COUNTS_JSON="$(jq -c '{
   accountSnapshot: .snapshot.desired_capacity
 }' <<<"$API_POOL_CAPACITY_JSON")"
 DEFAULT_STAIRCASE_TARGET_COUNT="$(jq -r --arg pattern "${QUERY_STAIRCASE_PATTERN:-accountById}" '.[$pattern] // 1' <<<"$STAIRCASE_TARGET_COUNTS_JSON")"
+STAIRCASE_SUITE_TARGET_COUNTS_JSON="$HEAVY_STAIRCASE_TARGET_COUNTS_JSON"
+if [[ "${QUERY_STAIRCASE_SUITE_NAME:-heavy}" == "all" ]]; then
+  STAIRCASE_SUITE_TARGET_COUNTS_JSON="$STAIRCASE_TARGET_COUNTS_JSON"
+fi
 
 LIGHT_API_REDIS_POOL_SIZE="${LIGHT_API_REDIS_POOL_SIZE:-$(jq -r '.light.redis_pool_size' <<<"$API_POOL_CAPACITY_JSON")}"
 POSITIONS_API_REDIS_POOL_SIZE="${POSITIONS_API_REDIS_POOL_SIZE:-$(jq -r '.positions.redis_pool_size' <<<"$API_POOL_CAPACITY_JSON")}"
@@ -91,7 +107,8 @@ for setting in \
   "SNAPSHOT_API_MAX_CONCURRENCY:${SNAPSHOT_API_MAX_CONCURRENCY}" \
   "API_KEEP_ALIVE_TIMEOUT:${API_KEEP_ALIVE_TIMEOUT}" \
   "AWS_LOAD_RUNNER_HOST_READY_TIMEOUT_SECONDS:${HOST_READY_TIMEOUT_SECONDS}" \
-  "AWS_LOAD_RUNNER_API_READY_TIMEOUT_SECONDS:${API_READY_TIMEOUT_SECONDS}"; do
+  "AWS_LOAD_RUNNER_API_READY_TIMEOUT_SECONDS:${API_READY_TIMEOUT_SECONDS}" \
+  "AWS_LOAD_RUNNER_API_ARTIFACT_TIMEOUT_SECONDS:${API_ARTIFACT_TIMEOUT_SECONDS}"; do
   setting_name="${setting%%:*}"
   setting_value="${setting#*:}"
   if [[ ! "$setting_value" =~ ^[0-9]+$ ]] || [[ "$setting_value" -lt 1 ]]; then
@@ -105,6 +122,40 @@ if [[ "$REUSE_HOSTS" != "0" && "$REUSE_HOSTS" != "1" ]]; then
   exit 1
 fi
 
+if [[ "$COLLECT_API_ARTIFACTS" != "0" && "$COLLECT_API_ARTIFACTS" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_COLLECT_API_ARTIFACTS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "$SKIP_BUNDLE_PUBLISH" != "0" && "$SKIP_BUNDLE_PUBLISH" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_SKIP_BUNDLE_PUBLISH must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "$SKIP_GENERATOR_SYNC" != "0" && "$SKIP_GENERATOR_SYNC" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_SKIP_GENERATOR_SYNC must be 0 or 1." >&2
+  exit 1
+fi
+
+if [[ "$SEED_INITIAL_LOAD" != "0" && "$SEED_INITIAL_LOAD" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_SEED_INITIAL_LOAD must be 0 or 1." >&2
+  exit 1
+fi
+
+if [[ "$SEED_INITIAL_LOAD" == "1" && "$DATASET_MODE" == "none" ]]; then
+  DATASET_MODE="auto"
+fi
+if [[ ! "$DATASET_MODE" =~ ^(none|auto|seed|restore)$ ]]; then
+  echo "AWS_LOAD_RUNNER_DATASET_MODE must be none, auto, seed, or restore." >&2
+  exit 1
+fi
+if [[ ! "$SEED_PARTITIONS" =~ ^[0-9]+$ ]] || [[ "$SEED_PARTITIONS" -lt 1 ]]; then
+  echo "AWS_LOAD_RUNNER_SEED_PARTITIONS must be a positive integer." >&2
+  exit 1
+fi
+if [[ "$SEED_RESET_CHECKPOINTS" != "0" && "$SEED_RESET_CHECKPOINTS" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_SEED_RESET_CHECKPOINTS must be 0 or 1." >&2
+  exit 1
+fi
+
 publish_deployment_bundle() {
   local bucket key bundle_path
   bucket="$(terraform -chdir="$TF_DIR" output -raw deployment_bundle_bucket)"
@@ -113,14 +164,22 @@ publish_deployment_bundle() {
   echo "Publishing the current workspace and .env.local to the private API bootstrap bundle..."
   tar -czf "$bundle_path" \
     --exclude './.git' \
+    --exclude './.DS_Store' \
     --exclude './.next' \
     --exclude './node_modules' \
+    --exclude './docs' \
     --exclude './memtier-output' \
     --exclude './monitor-input' \
+    --exclude './output' \
+    --exclude './tmp' \
     --exclude './infra/redis-cloud/.terraform' \
     --exclude './infra/redis-cloud/terraform.tfstate*' \
+    --exclude './infra/benchmark-backup/.terraform' \
+    --exclude './infra/benchmark-backup/terraform.tfstate*' \
+    --exclude './infra/benchmark-backup/tfplan*' \
     --exclude './infra/aws-load-runner/.terraform' \
     --exclude './infra/aws-load-runner/terraform.tfstate*' \
+    --exclude './infra/aws-load-runner/*.tfplan' \
     --exclude './infra/aws-load-runner/api-bundle.tgz' \
     -C "$ROOT_DIR" .
   aws s3 cp "$bundle_path" "s3://${bucket}/${key}" --region "$AWS_REGION" --sse AES256
@@ -154,7 +213,11 @@ discover_api_hosts() {
   return 1
 }
 
-publish_deployment_bundle
+if [[ "$SKIP_BUNDLE_PUBLISH" == "1" ]]; then
+  echo "Reusing the deployment bundle already uploaded for this retained fleet."
+else
+  publish_deployment_bundle
+fi
 
 LIGHT_API_HOSTS=()
 POSITIONS_API_HOSTS=()
@@ -218,13 +281,35 @@ esac
 
 GENERATOR_HOST="${ACTIVE_GENERATOR_HOSTS[0]}"
 
+SEED_GENERATOR_HOSTS=()
+if [[ "$DATASET_MODE" == "seed" || "$DATASET_MODE" == "auto" ]]; then
+  if [[ "${#GENERATOR_HOSTS[@]}" -lt "$SEED_PARTITIONS" ]]; then
+    echo "Dataset mode ${DATASET_MODE} requires ${SEED_PARTITIONS} generator hosts; only ${#GENERATOR_HOSTS[@]} are available." >&2
+    exit 1
+  fi
+  for (( index=0; index<SEED_PARTITIONS; index+=1 )); do
+    SEED_GENERATOR_HOSTS+=("${GENERATOR_HOSTS[$index]}")
+  done
+fi
+
+MANAGED_GENERATOR_HOSTS=("${ACTIVE_GENERATOR_HOSTS[@]}")
+if [[ "$DATASET_MODE" == "seed" || "$DATASET_MODE" == "auto" ]]; then
+  for candidate in "${SEED_GENERATOR_HOSTS[@]}"; do
+    already_managed=0
+    for managed in "${MANAGED_GENERATOR_HOSTS[@]}"; do
+      if [[ "$managed" == "$candidate" ]]; then already_managed=1; break; fi
+    done
+    if [[ "$already_managed" == "0" ]]; then MANAGED_GENERATOR_HOSTS+=("$candidate"); fi
+  done
+fi
+
 QUERY_BASE_URL="${QUERY_BASE_URL:-}"
 if [[ -z "$QUERY_BASE_URL" ]]; then
   QUERY_BASE_URL="$(terraform -chdir="$TF_DIR" output -raw generator_query_url)"
 fi
 
 for api_host in "${API_HOSTS[@]}"; do
-  for generator_host in "${ACTIVE_GENERATOR_HOSTS[@]}"; do
+  for generator_host in "${MANAGED_GENERATOR_HOSTS[@]}"; do
     if [[ "$api_host" == "$generator_host" ]]; then
       echo "The query API and load generators must use different hosts." >&2
       exit 1
@@ -246,6 +331,17 @@ SSH_OPTS=(
   -o ServerAliveInterval=30
   -o ServerAliveCountMax=3
 )
+if [[ "${AWS_LOAD_RUNNER_USE_SSM_SSH:-0}" == "1" ]]; then
+  SSH_OPTS+=(
+    -o ConnectTimeout=60
+    -o "ProxyCommand=bash '${ROOT_DIR}/scripts/aws-ssm-ssh-proxy.sh' %h %p"
+  )
+  export LPL_REDIS_ROOT_DIR="$ROOT_DIR"
+  RSYNC_SSH="${TMPDIR:-/tmp}/lpl-redis-ssm-rsh"
+  ln -sfn "${ROOT_DIR}/scripts/aws-ssm-rsync-rsh.sh" "$RSYNC_SSH"
+else
+  printf -v RSYNC_SSH '%q ' ssh "${SSH_OPTS[@]}"
+fi
 
 wait_for_host() {
   local role="$1"
@@ -275,14 +371,26 @@ sync_host() {
     --exclude 'infra/redis-cloud/.terraform/' \
     --exclude 'infra/redis-cloud/terraform.tfstate*' \
     --exclude 'infra/redis-cloud/tfplan*' \
+    --exclude 'infra/benchmark-backup/.terraform/' \
+    --exclude 'infra/benchmark-backup/terraform.tfstate*' \
+    --exclude 'infra/benchmark-backup/tfplan*' \
     --exclude 'infra/aws-load-runner/.terraform/' \
     --exclude 'infra/aws-load-runner/terraform.tfstate*' \
     --exclude 'infra/aws-load-runner/tfplan*' \
     --exclude 'infra/aws-load-runner/api-bundle.tgz' \
-    -e "ssh ${SSH_OPTS[*]}" \
+    -e "$RSYNC_SSH" \
     "${ROOT_DIR}/" "${SSH_USER}@${host}:${REMOTE_DIR}/"
 
   scp "${SSH_OPTS[@]}" "${ROOT_DIR}/.env.local" "${SSH_USER}@${host}:${REMOTE_DIR}/.env.local"
+  if [[ -n "$REDIS_CLUSTER_ROOT_NODES" ]]; then
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+      "sed -i '/^REDIS_/d' '${REMOTE_DIR}/.env.local' && \
+       printf '%s\n' \
+         'REDIS_CLUSTER_ROOT_NODES=${REDIS_CLUSTER_ROOT_NODES}' \
+         'REDIS_PASSWORD=${REDIS_CLUSTER_PASSWORD}' \
+         'REDIS_TLS=false' \
+         'REDIS_POOL_SIZE=32' >>'${REMOTE_DIR}/.env.local'"
+  fi
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "chmod 600 '${REMOTE_DIR}/.env.local'"
 }
 
@@ -367,16 +475,25 @@ collect_api_artifacts() {
   local index
   local api_host
   local worker_number
+  local artifact_pid
+  local artifact_pids=()
 
   for index in "${!hosts[@]}"; do
     api_host="${hosts[$index]}"
     worker_number="$(printf '%02d' "$((index + 1))")"
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
-      "curl -fsS 'http://127.0.0.1:${WEB_PORT}/api/health'" \
-      >"${ROOT_DIR}/memtier-output/aws-load-runner/api-health-${fleet}-${worker_number}.json" || true
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
-      "sudo journalctl -u lpl-query-api.service --no-pager -n 500" \
-      >"${ROOT_DIR}/memtier-output/aws-load-runner/web-${fleet}-${worker_number}.log" 2>&1 || true
+    (
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
+        "timeout ${API_ARTIFACT_TIMEOUT_SECONDS}s curl --max-time ${API_ARTIFACT_TIMEOUT_SECONDS} -fsS 'http://127.0.0.1:${WEB_PORT}/api/health'" \
+        >"${ROOT_DIR}/memtier-output/aws-load-runner/api-health-${fleet}-${worker_number}.json" || true
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${api_host}" \
+        "sudo timeout ${API_ARTIFACT_TIMEOUT_SECONDS}s journalctl -u lpl-query-api.service --no-pager -n 500" \
+        >"${ROOT_DIR}/memtier-output/aws-load-runner/web-${fleet}-${worker_number}.log" 2>&1 || true
+    ) &
+    artifact_pids+=("$!")
+  done
+
+  for artifact_pid in "${artifact_pids[@]}"; do
+    wait "$artifact_pid" || true
   done
 }
 
@@ -485,7 +602,7 @@ run_distributed_account_by_id() {
     shard_number=$(( index + 1 ))
     shard_name="$(printf 'shard-%02d' "$shard_number")"
     mkdir -p "${DISTRIBUTED_OUTPUT_DIR}/${shard_name}"
-    if ! rsync -az -e "ssh ${SSH_OPTS[*]}" \
+    if ! rsync -az -e "$RSYNC_SSH" \
       "${SSH_USER}@${generator_host}:${REMOTE_DIR}/${remote_output_root}/${shard_name}/" \
       "${DISTRIBUTED_OUTPUT_DIR}/${shard_name}/"; then
       benchmark_status=1
@@ -509,15 +626,18 @@ run_distributed_concurrent() {
     return 1
   fi
   local query_host_count=$(( host_count - trade_host_count ))
-  if (( query_host_count != 6 && query_host_count != 7 )); then
-    echo "Distributed concurrent mode requires six or seven query generators plus the dedicated trade generators; received ${query_host_count} query generators." >&2
+  if (( query_host_count < 6 )); then
+    echo "Distributed concurrent mode requires at least six query generators plus the dedicated trade generators; received ${query_host_count} query generators." >&2
     return 1
   fi
+  local total_default_target_rps="${QUERY_DEFAULT_TARGET_RPS:-$DEFAULT_STANDARD_QUERY_TARGET_RPS}"
+  local total_join_target_rps="${QUERY_JOIN_TARGET_RPS:-$DEFAULT_JOIN_QUERY_TARGET_RPS}"
   local total_trade_target_rps="${MEMTIER_TRADE_TARGET_RPS:-30000}"
   local total_trade_max_in_flight="${TRADE_MAX_IN_FLIGHT:-10000}"
+  local base_query_random_seed="${QUERY_RANDOM_SEED:-20260714}"
   local base_trade_random_seed="${TRADE_RANDOM_SEED:-20260714}"
   local value_name
-  for value_name in total_trade_target_rps total_trade_max_in_flight base_trade_random_seed; do
+  for value_name in total_default_target_rps total_join_target_rps total_trade_target_rps total_trade_max_in_flight base_query_random_seed base_trade_random_seed; do
     if [[ ! "${!value_name}" =~ ^[1-9][0-9]*$ ]]; then
       echo "${value_name} must be a positive integer." >&2
       return 1
@@ -529,8 +649,9 @@ run_distributed_concurrent() {
   local start_delay_seconds="${QUERY_SHARD_START_DELAY_SECONDS:-20}"
   local start_at_epoch_ms=$(( $(date +%s) * 1000 + start_delay_seconds * 1000 ))
   local remote_output_root="memtier-output/concurrent-${host_count}-hosts-${run_id}"
-  local -a query_groups
-  if (( query_host_count == 7 )); then
+  local -a query_groups query_group_assignments query_group_replica_counts
+  local -a extra_group_order=(4 5 6 2 3 0 1)
+  if (( query_host_count >= 7 )); then
     query_groups=(
       "account-by-id,security-by-id,security-by-no"
       "position-by-composite,transaction-by-id,transactions-by-account-security"
@@ -540,6 +661,17 @@ run_distributed_concurrent() {
       "account-activity-join"
       "account-snapshot"
     )
+    query_group_replica_counts=(0 0 0 0 0 0 0)
+    local assignment_index group_id
+    for (( assignment_index=0; assignment_index<query_host_count; assignment_index+=1 )); do
+      if (( assignment_index < 7 )); then
+        group_id="$assignment_index"
+      else
+        group_id="${extra_group_order[$(( (assignment_index - 7) % ${#extra_group_order[@]} ))]}"
+      fi
+      query_group_assignments+=("$group_id")
+      query_group_replica_counts[$group_id]=$(( query_group_replica_counts[$group_id] + 1 ))
+    done
   else
     query_groups=(
       "account-by-id,security-by-id,security-by-no,position-by-composite,transaction-by-id,transactions-by-account-security"
@@ -549,12 +681,16 @@ run_distributed_concurrent() {
       "account-activity-join"
       "account-snapshot"
     )
+    query_group_assignments=(0 1 2 3 4 5)
+    query_group_replica_counts=(1 1 1 1 1 1)
   fi
   local -a generator_pids=()
   local benchmark_status=0
   local index generator_host host_number host_name remote_host_directory
   local query_csv run_queries run_trade trade_shard_index trade_target_rps
-  local trade_max_in_flight trade_random_seed pid
+  local trade_max_in_flight trade_random_seed query_group_id query_group_shard_index
+  local query_group_shard_count query_target_rps query_join_target_rps query_random_seed
+  local previous_index pid
 
   if [[ ! "$run_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "QUERY_RUN_ID may contain only letters, numbers, dots, underscores, and hyphens." >&2
@@ -579,9 +715,24 @@ run_distributed_concurrent() {
     trade_target_rps=1
     trade_max_in_flight=1
     trade_random_seed="$base_trade_random_seed"
+    query_group_shard_index=1
+    query_group_shard_count=1
+    query_target_rps=1
+    query_join_target_rps=1
+    query_random_seed="$base_query_random_seed"
     if (( index < query_host_count )); then
       run_queries=1
-      query_csv="${query_groups[$index]}"
+      query_group_id="${query_group_assignments[$index]}"
+      query_csv="${query_groups[$query_group_id]}"
+      query_group_shard_count="${query_group_replica_counts[$query_group_id]}"
+      for (( previous_index=0; previous_index<index; previous_index+=1 )); do
+        if [[ "${query_group_assignments[$previous_index]}" == "$query_group_id" ]]; then
+          query_group_shard_index=$(( query_group_shard_index + 1 ))
+        fi
+      done
+      query_target_rps="$(allocate_share "$total_default_target_rps" "$((query_group_shard_index - 1))" "$query_group_shard_count")"
+      query_join_target_rps="$(allocate_share "$total_join_target_rps" "$((query_group_shard_index - 1))" "$query_group_shard_count")"
+      query_random_seed=$(( base_query_random_seed + index * 1000003 ))
     else
       run_trade=1
       trade_shard_index=$(( index - query_host_count + 1 ))
@@ -597,8 +748,8 @@ run_distributed_concurrent() {
        QUERY_BENCHMARKS='${query_csv}' \
        RUN_QUERY_BENCHMARKS='${run_queries}' \
        RUN_TRADE_WRITES='${run_trade}' \
-       QUERY_DEFAULT_TARGET_RPS='${QUERY_DEFAULT_TARGET_RPS:-$DEFAULT_STANDARD_QUERY_TARGET_RPS}' \
-       QUERY_JOIN_TARGET_RPS='${QUERY_JOIN_TARGET_RPS:-$DEFAULT_JOIN_QUERY_TARGET_RPS}' \
+       QUERY_DEFAULT_TARGET_RPS='${query_target_rps}' \
+       QUERY_JOIN_TARGET_RPS='${query_join_target_rps}' \
        QUERY_TEST_TIME='${QUERY_TEST_TIME:-60}' \
        QUERY_WARMUP_TIME='${QUERY_WARMUP_TIME:-0}' \
        QUERY_REQUEST_TIMEOUT_MS='${QUERY_REQUEST_TIMEOUT_MS:-30000}' \
@@ -609,7 +760,11 @@ run_distributed_concurrent() {
        QUERY_MAX_SOCKETS='${QUERY_MAX_SOCKETS:-10000}' \
        QUERY_MAX_FREE_SOCKETS='${QUERY_MAX_FREE_SOCKETS:-512}' \
        QUERY_SAMPLE_POOL_SIZE='${QUERY_SAMPLE_POOL_SIZE:-1000}' \
-       QUERY_RANDOM_SEED='${QUERY_RANDOM_SEED:-20260714}' \
+       QUERY_RANDOM_SEED='${query_random_seed}' \
+       QUERY_GENERATOR_SHARD_INDEX='${query_group_shard_index}' \
+       QUERY_GENERATOR_SHARD_COUNT='${query_group_shard_count}' \
+       QUERY_GENERATOR_HOST='${generator_host}' \
+       QUERY_EXPORT_LATENCY_HISTOGRAM=1 \
        MEMTIER_TRADE_TARGET_RPS='${trade_target_rps}' \
        TRADE_MAX_IN_FLIGHT='${trade_max_in_flight}' \
        TRADE_SAMPLE_POOL_SIZE='${TRADE_SAMPLE_POOL_SIZE:-1000}' \
@@ -634,7 +789,7 @@ run_distributed_concurrent() {
     host_number=$(( index + 1 ))
     host_name="$(printf 'host-%02d' "$host_number")"
     mkdir -p "${DISTRIBUTED_OUTPUT_DIR}/${host_name}"
-    if ! rsync -az -e "ssh ${SSH_OPTS[*]}" \
+    if ! rsync -az -e "$RSYNC_SSH" \
       "${SSH_USER}@${generator_host}:${REMOTE_DIR}/${remote_output_root}/${host_name}/" \
       "${DISTRIBUTED_OUTPUT_DIR}/${host_name}/"; then
       benchmark_status=1
@@ -656,11 +811,15 @@ run_distributed_concurrent() {
   return "$benchmark_status"
 }
 
-for index in "${!ACTIVE_GENERATOR_HOSTS[@]}"; do
-  generator_host="${ACTIVE_GENERATOR_HOSTS[$index]}"
+for index in "${!MANAGED_GENERATOR_HOSTS[@]}"; do
+  generator_host="${MANAGED_GENERATOR_HOSTS[$index]}"
   generator_number=$((index + 1))
-  wait_for_host "load generator ${generator_number}/${#ACTIVE_GENERATOR_HOSTS[@]}" "$generator_host"
-  sync_host "load generator ${generator_number}/${#ACTIVE_GENERATOR_HOSTS[@]}" "$generator_host"
+  wait_for_host "load generator ${generator_number}/${#MANAGED_GENERATOR_HOSTS[@]}" "$generator_host"
+  if [[ "$SKIP_GENERATOR_SYNC" == "0" ]]; then
+    sync_host "load generator ${generator_number}/${#MANAGED_GENERATOR_HOSTS[@]}" "$generator_host"
+  else
+    echo "Reusing synchronized load generator ${generator_number}/${#MANAGED_GENERATOR_HOSTS[@]} on ${generator_host}."
+  fi
 done
 
 if [[ "$REUSE_HOSTS" == "1" ]]; then
@@ -681,7 +840,6 @@ wait_for_target_group "portfolio" "${#PORTFOLIO_API_HOSTS[@]}" "$(jq -r '.portfo
 wait_for_target_group "activity" "${#ACTIVITY_API_HOSTS[@]}" "$(jq -r '.activity' <<<"$API_TARGET_GROUP_ARNS_JSON")"
 wait_for_target_group "snapshot" "${#SNAPSHOT_API_HOSTS[@]}" "$(jq -r '.snapshot' <<<"$API_TARGET_GROUP_ARNS_JSON")"
 
-generator_install_pids=()
 for index in "${!ACTIVE_GENERATOR_HOSTS[@]}"; do
   generator_host="${ACTIVE_GENERATOR_HOSTS[$index]}"
   generator_number=$((index + 1))
@@ -694,20 +852,63 @@ for index in "${!ACTIVE_GENERATOR_HOSTS[@]}"; do
     fi
     sleep 5
   done
-  echo "Installing load generator ${generator_number}/${#ACTIVE_GENERATOR_HOSTS[@]} dependencies on ${generator_host}..."
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${generator_host}" \
-    "cd '${REMOTE_DIR}' && npm ci --no-audit --no-fund" &
-  generator_install_pids+=("$!")
 done
 
-generator_install_status=0
-for pid in "${generator_install_pids[@]}"; do
-  wait "$pid" || generator_install_status=1
-done
-if [[ "$generator_install_status" -ne 0 ]]; then
-  echo "One or more load generators failed dependency installation." >&2
-  exit 1
+if [[ "$SKIP_GENERATOR_SYNC" == "0" ]]; then
+  generator_install_pids=()
+  for index in "${!MANAGED_GENERATOR_HOSTS[@]}"; do
+    generator_host="${MANAGED_GENERATOR_HOSTS[$index]}"
+    generator_number=$((index + 1))
+    echo "Installing load generator ${generator_number}/${#MANAGED_GENERATOR_HOSTS[@]} dependencies on ${generator_host}..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${generator_host}" \
+      "cd '${REMOTE_DIR}' && npm ci --no-audit --no-fund" &
+    generator_install_pids+=("$!")
+  done
+
+  generator_install_status=0
+  for pid in "${generator_install_pids[@]}"; do
+    wait "$pid" || generator_install_status=1
+  done
+  if [[ "$generator_install_status" -ne 0 ]]; then
+    echo "One or more load generators failed dependency installation." >&2
+    exit 1
+  fi
+else
+  echo "Reusing the synchronized source and installed dependencies on all load generators."
 fi
+
+restore_dataset() {
+  echo "Restoring the latest retained Redis Cloud RDB dataset before the benchmark..."
+  REDIS_BACKUP_ASSUME_YES=1 "${ROOT_DIR}/scripts/redis-cloud-rdb.sh" restore
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
+    "cd '${REMOTE_DIR}' && npm run redis:indexes && npm run redis:functions"
+}
+
+seed_and_backup_dataset() {
+  echo "Running the ${SEED_PARTITIONS}-host resumable initial load..."
+  AWS_LOAD_RUNNER_KEY_PATH="$SSH_KEY_PATH" \
+    AWS_LOAD_RUNNER_REMOTE_DIR="$REMOTE_DIR" \
+    AWS_LOAD_RUNNER_SSH_USER="$SSH_USER" \
+    AWS_SEED_PARTITIONS="$SEED_PARTITIONS" \
+    AWS_SEED_RESET_CHECKPOINTS="$SEED_RESET_CHECKPOINTS" \
+    "${ROOT_DIR}/scripts/aws-seed-initial-load.sh" "${SEED_GENERATOR_HOSTS[@]}"
+  echo "Exporting the completed dataset to retained shard RDB backups..."
+  "${ROOT_DIR}/scripts/redis-cloud-rdb.sh" backup
+}
+
+case "$DATASET_MODE" in
+  none) ;;
+  restore) restore_dataset ;;
+  seed) seed_and_backup_dataset ;;
+  auto)
+    if "${ROOT_DIR}/scripts/redis-cloud-rdb.sh" has-backup; then
+      restore_dataset
+    else
+      echo "No completed RDB manifest exists; this is the one-time seed run."
+      seed_and_backup_dataset
+    fi
+    ;;
+esac
 
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
   "cd '${REMOTE_DIR}' && npm run metrics:redis -- before-${BENCHMARK}"
@@ -742,7 +943,7 @@ case "$BENCHMARK" in
     default_join_target_rps="$DEFAULT_JOIN_QUERY_TARGET_RPS"
     ;;
   staircaseSuite)
-    benchmark_command="npm run bench:query:staircase:heavy"
+    benchmark_command="npm run bench:query:staircase:suite"
     default_max_in_flight=10000
     default_query_target_rps="$DEFAULT_STANDARD_QUERY_TARGET_RPS"
     default_join_target_rps="$DEFAULT_JOIN_QUERY_TARGET_RPS"
@@ -784,12 +985,14 @@ else
      QUERY_STAIRCASE_PATTERN='${QUERY_STAIRCASE_PATTERN:-accountById}' \
      QUERY_STAIRCASE_TARGET_COUNT='${QUERY_STAIRCASE_TARGET_COUNT:-$DEFAULT_STAIRCASE_TARGET_COUNT}' \
      QUERY_STAIRCASE_SUITE_PATTERNS='${QUERY_STAIRCASE_SUITE_PATTERNS:-}' \
-     QUERY_STAIRCASE_TARGET_COUNTS_JSON='${QUERY_STAIRCASE_TARGET_COUNTS_JSON:-$HEAVY_STAIRCASE_TARGET_COUNTS_JSON}' \
+     QUERY_STAIRCASE_SUITE_NAME='${QUERY_STAIRCASE_SUITE_NAME:-heavy}' \
+     QUERY_STAIRCASE_TARGET_COUNTS_JSON='${QUERY_STAIRCASE_TARGET_COUNTS_JSON:-$STAIRCASE_SUITE_TARGET_COUNTS_JSON}' \
      QUERY_STAIRCASE_RATES='${QUERY_STAIRCASE_RATES:-1000,2000,4000,8000}' \
      QUERY_STAIRCASE_P95_SLO_MS='${QUERY_STAIRCASE_P95_SLO_MS:-250}' \
      QUERY_STAIRCASE_MAX_ERROR_RATE='${QUERY_STAIRCASE_MAX_ERROR_RATE:-0.001}' \
      QUERY_STAIRCASE_MIN_ACHIEVEMENT_RATIO='${QUERY_STAIRCASE_MIN_ACHIEVEMENT_RATIO:-0.98}' \
      QUERY_STAIRCASE_HEADROOM_FACTOR='${QUERY_STAIRCASE_HEADROOM_FACTOR:-1.3}' \
+     QUERY_STAIRCASE_PAYLOAD_TOLERANCE='${QUERY_STAIRCASE_PAYLOAD_TOLERANCE:-0.05}' \
      QUERY_STAIRCASE_STOP_ON_FAILURE='${QUERY_STAIRCASE_STOP_ON_FAILURE:-1}' \
      QUERY_GENERATOR_PROCESSES='${QUERY_GENERATOR_PROCESSES}' \
      QUERY_SHARD_START_DELAY_SECONDS='${QUERY_SHARD_START_DELAY_SECONDS:-10}' \
@@ -813,7 +1016,7 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${GENERATOR_HOST}" \
 mkdir -p "${ROOT_DIR}/memtier-output/aws-load-runner"
 if [[ "$QUERY_GENERATOR_MODE" == "distributed" ]]; then
   for metric_phase in before after; do
-    rsync -az -e "ssh ${SSH_OPTS[*]}" \
+    rsync -az -e "$RSYNC_SSH" \
       "${SSH_USER}@${GENERATOR_HOST}:${REMOTE_DIR}/memtier-output/redis-metrics-${metric_phase}-${BENCHMARK}.json" \
       "${ROOT_DIR}/memtier-output/aws-load-runner/" || true
     if [[ -n "$DISTRIBUTED_OUTPUT_DIR" ]]; then
@@ -822,17 +1025,21 @@ if [[ "$QUERY_GENERATOR_MODE" == "distributed" ]]; then
     fi
   done
 else
-  rsync -az -e "ssh ${SSH_OPTS[*]}" \
+  rsync -az -e "$RSYNC_SSH" \
     "${SSH_USER}@${GENERATOR_HOST}:${REMOTE_DIR}/memtier-output/" \
     "${ROOT_DIR}/memtier-output/aws-load-runner/"
 fi
 
-collect_api_artifacts "light" "${LIGHT_API_HOSTS[@]}"
-collect_api_artifacts "positions" "${POSITIONS_API_HOSTS[@]}"
-collect_api_artifacts "transactions" "${TRANSACTIONS_API_HOSTS[@]}"
-collect_api_artifacts "portfolio" "${PORTFOLIO_API_HOSTS[@]}"
-collect_api_artifacts "activity" "${ACTIVITY_API_HOSTS[@]}"
-collect_api_artifacts "snapshot" "${SNAPSHOT_API_HOSTS[@]}"
+if [[ "$COLLECT_API_ARTIFACTS" == "1" ]]; then
+  collect_api_artifacts "light" "${LIGHT_API_HOSTS[@]}"
+  collect_api_artifacts "positions" "${POSITIONS_API_HOSTS[@]}"
+  collect_api_artifacts "transactions" "${TRANSACTIONS_API_HOSTS[@]}"
+  collect_api_artifacts "portfolio" "${PORTFOLIO_API_HOSTS[@]}"
+  collect_api_artifacts "activity" "${ACTIVITY_API_HOSTS[@]}"
+  collect_api_artifacts "snapshot" "${SNAPSHOT_API_HOSTS[@]}"
+else
+  echo "Skipping per-worker API artifact collection."
+fi
 
 echo "Downloaded generator results to memtier-output/aws-load-runner"
 echo "API pool workers and Redis connections:"

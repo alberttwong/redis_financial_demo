@@ -1,6 +1,6 @@
 # Redis Financial Demo
 
-Demo app for SQL-batched financial data in Redis Cloud 8.4. The app stores flat SQL-friendly JSON rows in Redis Cloud, creates narrow Redis Query Engine indexes, exposes timed UI/API query examples, and includes Faker seeders plus query and atomic trade-write load tests.
+Demo app for SQL-batched financial data in Redis Cloud 8.6. The app stores flat SQL-friendly JSON rows in Redis Cloud, creates narrow Redis Query Engine indexes, exposes timed UI/API query examples, and includes Faker seeders plus query and atomic trade-write load tests.
 
 GitHub repository: <https://github.com/alberttwong/redis_financial_demo>
 
@@ -336,6 +336,8 @@ npm run bench:query:staircase:heavy
 
 Each pattern keeps its existing payload and writes an individual staircase plus `heavy-staircase-summary.json` and Markdown rollup.
 
+Set `QUERY_STAIRCASE_SUITE_NAME=all` to run all 12 patterns, including every query in the shared light pool. The complete suite writes `query-staircase-suite-summary.json` and Markdown, and rejects steps whose average API payload differs by more than 5% from the full-payload baseline.
+
 ### AWS us-west-2 Runner
 
 For a cleaner Redis Cloud benchmark, run the query app and load generators from AWS `us-west-2` near the database instead of from a laptop:
@@ -377,9 +379,9 @@ QUERY_SAMPLE_POOL_SIZE=1000 \
 
 `QUERY_WARMUP_TIME` primes HTTP keep-alive and Redis connection pools before the measured window. Warm-up requests drain before measurement and remain separate in each shard artifact.
 
-The runner defaults to `AWS_LOAD_RUNNER_REUSE_HOSTS=1` because a newly provisioned API fleet already installed the exact Terraform-managed bundle. Generator source is always synchronized and its dependencies are installed in parallel, because generator instances do not consume the API bootstrap bundle. Set reuse to `0` only when deliberately rebuilding the API fleet after local code changes.
+The runner defaults to `AWS_LOAD_RUNNER_REUSE_HOSTS=1` because a newly provisioned API fleet already installed the exact Terraform-managed bundle. Generator source is normally synchronized and its dependencies are installed in parallel, because generator instances do not consume the API bootstrap bundle. For consecutive staircase levels with no local source or dependency changes, set `AWS_LOAD_RUNNER_SKIP_GENERATOR_SYNC=1` to reuse the synchronized generator checkout and installed dependencies. Set API reuse to `0` only when deliberately rebuilding the API fleet after local code changes.
 
-`QUERY_GENERATOR_MODE=distributed` also spreads the complete concurrent profile across all generator hosts. By default, `TRADE_GENERATOR_COUNT=2` reserves the final two hosts for disjoint trade-write shards. The other seven hosts isolate the five heavyweight pools and split the six measured light queries across two generators. The aggregate trade target, maximum in-flight limit, and 1,000-account sample pool are divided across the two writers, while every process shares one epoch-time start barrier.
+`QUERY_GENERATOR_MODE=distributed` also spreads the complete concurrent profile across all generator hosts. By default, `TRADE_GENERATOR_COUNT=2` reserves the final two hosts for disjoint trade-write shards. The remaining hosts are assigned across seven query groups: two light groups, positions, transactions, portfolio, activity, and snapshot. With more than seven query generators, group assignments repeat and each pattern's aggregate target is divided across its group replicas. The aggregate trade target, maximum in-flight limit, and 1,000-account sample pool are divided across the writers, while every process shares one epoch-time start barrier.
 
 Use `AWS_LOAD_RUNNER_BENCHMARK=concurrent` (the default) for the complete 12-query plus trade-write profile. Terraform prints the API Auto Scaling Group and target-group maps plus `generator_query_url` for the private load-balanced route.
 
@@ -393,7 +395,7 @@ The development profile uses 100 accounts, 500 securities, 6,000 positions, 30,0
 npm run seed:dev
 ```
 
-The initial load profile generates **5,000 accounts**. The seeder writes base JSON rows first, creates or verifies Redis Query Engine indexes after the base load, then builds account snapshots with bounded concurrency.
+The initial load profile generates **6,600 accounts**. The seeder writes base JSON rows first, creates or verifies Redis Query Engine indexes after the base load, then builds account snapshots with bounded concurrency.
 
 ### Full Initial Load
 
@@ -403,6 +405,58 @@ npm run seed:initial-load
 ```
 
 `seed:initial-load` sources `.env.local` and `.env.initial-load` for you, prints the active load shape, and then runs the full seeding sequence.
+
+The full loader is deterministic and resumable. It records the oldest completely
+written batch for each phase in Redis, so a restarted worker resumes without
+skipping data. Checkpoints are deleted only after indexes and snapshots finish.
+
+### Distributed Initial Load
+
+The AWS benchmark stack has nine generator hosts. Use eight for the one-time
+base load; the 6,600-account profile divides exactly into 825 accounts, 412,500
+positions, and 30,112,500 transactions per host:
+
+```sh
+AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem \
+AWS_SEED_PARTITIONS=8 \
+AWS_SEED_WORKER_HOSTS=host1,host2,host3,host4,host5,host6,host7,host8 \
+  scripts/aws-seed-initial-load.sh
+```
+
+The coordinator seeds shared securities once, runs account-owned partitions in
+parallel, then creates indexes and snapshots once. Set
+`AWS_SEED_RESET_CHECKPOINTS=1` only when intentionally restarting the same
+profile from zero. Cluster-aware Redis clients group each write pipeline by hash
+slot and send groups directly to their owning primaries.
+
+### Seed Once, Restore Every Benchmark
+
+Provision the retained backup bucket separately from disposable benchmark
+resources:
+
+```sh
+terraform -chdir=infra/benchmark-backup init
+terraform -chdir=infra/benchmark-backup apply
+```
+
+For the first run, `AWS_LOAD_RUNNER_DATASET_MODE=auto` sees that no completed
+manifest exists, runs the distributed seed, asks Redis Cloud to export one RDB
+per shard, and writes a `latest.json` manifest. Later runs import every RDB in
+that manifest before load generation:
+
+```sh
+AWS_LOAD_RUNNER_KEY_PATH=~/.ssh/<your-key>.pem \
+AWS_LOAD_RUNNER_DATASET_MODE=auto \
+AWS_LOAD_RUNNER_SEED_PARTITIONS=8 \
+QUERY_GENERATOR_MODE=distributed \
+  npm run bench:aws-runner
+```
+
+Use `seed` to force a new seed plus backup, `restore` to require an existing
+backup, or `none` to leave the current database untouched. Import overwrites the
+target Redis Cloud database. The persistent bucket is not part of either normal
+AWS runner or Redis Cloud teardown; the seed RDB is retained by default, with an
+optional expiry controlled by the backup stack.
 
 ### Base Data First
 
@@ -427,6 +481,9 @@ Useful tuning knobs in `.env.initial-load`:
 SEED_BATCH_SIZE=2000
 SEED_WRITE_CONCURRENCY=8
 SEED_SNAPSHOT_CONCURRENCY=25
+SEED_RESUME=true
+SEED_AS_OF_DATE=2026-07-22
+SEED_INDEX_TIMEOUT_MS=21600000
 SEED_DROP_INDEXES_BEFORE_LOAD=true
 SEED_SKIP_SNAPSHOTS=false
 ```
@@ -438,11 +495,11 @@ The fastest full load is from a machine close to Redis Cloud, for example a temp
 This profile expands to:
 
 ```text
-5,000 accounts
-3,000 securities
-1,500,000 positions
-10,000,000 random transactions across the accounts
-5,000 account snapshots
+6,600 accounts
+3,960 securities
+3,300,000 positions
+240,900,000 transactions across the accounts
+6,600 account snapshots
 ```
 
 Account rows are compact metadata documents without synthetic payloads. Larger payload sizing remains available for securities, positions, transactions, and generated trade writes.
@@ -485,6 +542,12 @@ Use the Terraform `redis_url`, `redis_tls`, `redis_host`, `redis_port`, and `red
 
 The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 20 GB dataset size, and throughput sizing set to 300,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
 
+Set `support_oss_cluster_api=true` and
+`external_endpoint_for_oss_cluster_api=true` to expose the managed Redis Cloud
+shard topology to cluster-aware clients outside the Redis Cloud VPC. In this
+mode, configure `REDIS_CLUSTER_ROOT_NODES` from the Terraform
+`redis_cluster_root_nodes` output instead of using `REDIS_URL`.
+
 Moving an existing Terraform-managed Essentials database to the default Pro/Flexible resource family is a replacement, not an in-place resize in this repo. Plan to export or reseed data when applying that change.
 
 ## Assumptions
@@ -495,8 +558,8 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Account Info documents are compact metadata rows without synthetic payloads, and single-account reads return the full JSON document.
 - Security Info documents are configurable up to 100KB and mimic S&P 500-style equity constituents with sector, industry, exchange, and index membership metadata.
 - Position and Transaction documents are configurable up to 400KB, but the default demo payloads are smaller to fit the current Redis Cloud demo database.
-- Initial load generates 5,000 accounts and 3,000 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
-- With the default initial-load profile, 5,000 accounts produces 1,500,000 positions, 10,000,000 random transactions across the account population, and 5,000 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
+- Initial load generates 6,600 accounts and 3,960 securities. Base rows are loaded before Redis Query Engine indexes are created for faster fresh-database loads.
+- With the default initial-load profile, 6,600 accounts produces 3,300,000 positions, 240,900,000 transactions across the account population, and 6,600 materialized account snapshots. Snapshot generation can be skipped with `SEED_SKIP_SNAPSHOTS=true` or parallelized with `SEED_SNAPSHOT_CONCURRENCY`.
 - In a typical stock trading scenario, `transactions` are the incoming change/history records and `positions` are derived current or as-of holdings.
 - Runtime secondary queries return projection fields directly in one `FT.SEARCH`. Portfolio and activity joins read prejoined account snapshot fields in one `JSON.GET`; the API only maps the stored activity field to the public `transactions` response name.
 - Redis is not used as a relational SQL join planner.

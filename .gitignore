@@ -1,10 +1,13 @@
 .env
 .env.local
 .env.*.local
+.DS_Store
 .next/
 node_modules/
 coverage/
 dist/
+output/
+tmp/
 tsconfig.tsbuildinfo
 *.log
 memtier-output/
@@ -14,4 +17,6 @@ terraform.tfstate
 terraform.tfstate.*
 tfplan
 tfplan-*
+*.tfplan
+*.tfvars
 infra/aws-load-runner/api-bundle.tgz

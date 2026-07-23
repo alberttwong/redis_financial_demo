@@ -1,5 +1,4 @@
 import { performance } from "node:perf_hooks";
-import type { RedisClientType } from "redis";
 import { INDEXES } from "./indexes";
 import { measure, roundMs } from "./timing";
 import { jsonGet, jsonGetFields } from "./json";
@@ -16,6 +15,7 @@ import {
   TRANSACTION_PROJECTION_FIELDS
 } from "./projections";
 import { searchProjected } from "./search";
+import type { RedisConnection } from "./redis";
 import { tagEquals } from "./tag";
 import type {
   AccountRow,
@@ -31,7 +31,7 @@ import type {
 } from "./types";
 
 type QueryContext = {
-  client: RedisClientType;
+  client: RedisConnection;
   startedAt?: number;
 };
 
@@ -121,17 +121,44 @@ export async function positionsByAccount(
 ): Promise<QueryResult<PositionProjection[]>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
+  const key = snapshotKey(accountId);
+  type Projection = Pick<AccountSnapshot, "position_count" | "positions">;
+  const projected = await measure(() =>
+    jsonGetFields<Projection>(ctx.client, key, ["position_count", "positions"])
+  );
+  timing.redis_ms = projected.ms;
+  if (projected.value && projected.value.positions.length !== projected.value.position_count) {
+    throw new Error(
+      `Account ${accountId} snapshot position_count ${projected.value.position_count} does not match positions length ${projected.value.positions.length}`
+    );
+  }
+  const data = projected.value?.positions.map(withoutSecurity) ?? [];
+  return response(startedAt, data, timing, data.length, 1, [
+    `JSON.GET ${key} $.position_count $.positions`
+  ]);
+}
+
+export async function positionsSearchByAccount(
+  ctx: QueryContext,
+  accountId: string
+): Promise<QueryResult<PositionProjection[]>> {
+  const startedAt = ctx.startedAt ?? performance.now();
+  const timing = emptyTimings();
   const query = tagEquals("account_id", accountId);
   const search = await measure(() =>
-    searchProjected<PositionProjection>(ctx.client, INDEXES.positions, query, POSITION_PROJECTION_FIELDS, {
-      limit: 500
-    })
+    searchProjected<PositionProjection>(
+      ctx.client,
+      INDEXES.positions,
+      query,
+      POSITION_PROJECTION_FIELDS,
+      { limit: 500, dialect: 4 }
+    )
   );
   timing.search_ms = search.ms;
   timing.redis_ms = search.ms;
   const data = search.value.rows;
   return response(startedAt, data, timing, data.length, 1, [
-    `FT.SEARCH ${INDEXES.positions} "${query}" RETURN <projected-fields> LIMIT 0 500 DIALECT 2`
+    `FT.SEARCH ${INDEXES.positions} "${query}" RETURN <projected-fields> LIMIT 0 500 DIALECT 4`
   ]);
 }
 
@@ -192,14 +219,42 @@ export async function transactionsSearch(
       INDEXES.transactions,
       query,
       TRANSACTION_PROJECTION_FIELDS,
-      { limit }
+      {
+        limit,
+        dialect: 4,
+        sortBy: {
+          field: "trade_date_epoch",
+          direction: "DESC",
+          withoutCount: true
+        }
+      }
     )
   );
   timing.search_ms = search.ms;
   timing.redis_ms = search.ms;
   const data = search.value.rows;
   return response(startedAt, data, timing, data.length, 1, [
-    `FT.SEARCH ${INDEXES.transactions} "${query}" RETURN <projected-fields> LIMIT 0 ${limit} DIALECT 2`
+    `FT.SEARCH ${INDEXES.transactions} "${query}" RETURN <projected-fields> SORTBY trade_date_epoch DESC WITHOUTCOUNT LIMIT 0 ${limit} DIALECT 4`
+  ]);
+}
+
+export async function transactionsByAccount(
+  ctx: QueryContext,
+  accountId: string,
+  limit = 100
+): Promise<QueryResult<TransactionProjection[]>> {
+  const startedAt = ctx.startedAt ?? performance.now();
+  const timing = emptyTimings();
+  const key = snapshotKey(accountId);
+  type Projection = Pick<AccountSnapshot, "recent_transactions">;
+  const projected = await measure(() =>
+    jsonGetFields<Projection>(ctx.client, key, ["recent_transactions"])
+  );
+  timing.redis_ms = projected.ms;
+  const boundedLimit = Math.max(0, Math.min(limit, 200));
+  const data = (projected.value?.recent_transactions ?? []).slice(0, boundedLimit).map(withoutSecurity);
+  return response(startedAt, data, timing, data.length, 1, [
+    `JSON.GET ${key} $.recent_transactions`
   ]);
 }
 
@@ -279,4 +334,11 @@ export async function accountSnapshot(
   return response(startedAt, value, timing, value ? 1 : 0, 1, [
     `JSON.GET ${snapshotKey(accountId)} <public-projection-fields>`
   ]);
+}
+
+function withoutSecurity<T extends { security?: SecurityProjection }>(
+  value: T
+): Omit<T, "security"> {
+  const { security: _security, ...projection } = value;
+  return projection;
 }

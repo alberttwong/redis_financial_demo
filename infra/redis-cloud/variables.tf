@@ -80,10 +80,32 @@ variable "throughput_measurement_value" {
   default     = 300000
 }
 
+variable "support_oss_cluster_api" {
+  description = "Enable the Redis OSS Cluster API on the Redis Cloud Pro database."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.support_oss_cluster_api || lower(var.subscription_type) == "pro"
+    error_message = "support_oss_cluster_api requires subscription_type=pro."
+  }
+}
+
+variable "external_endpoint_for_oss_cluster_api" {
+  description = "Advertise the public Redis Cloud shard endpoints to cluster-aware clients."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.external_endpoint_for_oss_cluster_api || var.support_oss_cluster_api
+    error_message = "external_endpoint_for_oss_cluster_api requires support_oss_cluster_api=true."
+  }
+}
+
 variable "redis_version" {
   description = "Redis database version to provision."
   type        = string
-  default     = "8.4"
+  default     = "8.6"
 }
 
 variable "essentials_plan_id" {
@@ -138,4 +160,32 @@ variable "redis_password" {
   type        = string
   sensitive   = true
   default     = null
+}
+
+variable "backup_s3_path" {
+  description = "Optional bucket-level S3 URI for Redis Cloud Pro remote RDB backups, such as s3://bucket."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.backup_s3_path == null || startswith(var.backup_s3_path, "s3://")
+    error_message = "backup_s3_path must be null or an s3:// URI."
+  }
+}
+
+variable "backup_interval" {
+  description = "Redis Cloud Pro remote backup interval."
+  type        = string
+  default     = "every-24-hours"
+}
+
+variable "backup_time_utc" {
+  description = "UTC time for the daily Redis Cloud Pro remote backup."
+  type        = string
+  default     = "06:00"
+
+  validation {
+    condition     = can(regex("^([01][0-9]|2[0-3]):[0-5][0-9]$", var.backup_time_utc))
+    error_message = "backup_time_utc must use HH:MM UTC format."
+  }
 }

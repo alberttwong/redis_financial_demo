@@ -38,6 +38,20 @@ output "redis_dataset_size_in_gb" {
   value       = local.redis_dataset_size_in_gb
 }
 
+output "redis_support_oss_cluster_api" {
+  description = "Whether the Redis Cloud database exposes the Redis OSS Cluster API."
+  value       = local.subscription_type == "pro" && var.support_oss_cluster_api
+}
+
+output "redis_cluster_root_nodes" {
+  description = "Comma-separated root endpoint URLs for a Redis OSS Cluster API client."
+  value = (
+    local.subscription_type == "pro" && var.support_oss_cluster_api
+    ? "${local.redis_tls ? "rediss" : "redis"}://${local.redis_public_endpoint}"
+    : ""
+  )
+}
+
 output "redis_password" {
   description = "Redis Cloud database password."
   value       = local.redis_password
@@ -48,4 +62,9 @@ output "redis_url" {
   description = "Redis Cloud connection string for the demo app."
   value       = "${local.redis_tls ? "rediss" : "redis"}://default:${local.redis_password}@${local.redis_public_endpoint}"
   sensitive   = true
+}
+
+output "redis_backup_s3_path" {
+  description = "Configured Redis Cloud scheduled remote backup path, when enabled."
+  value       = var.backup_s3_path
 }
