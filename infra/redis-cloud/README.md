@@ -10,7 +10,7 @@ Defaults:
 - Database: `lpl-query-patterns`
 - Redis version: `8.6`
 - Dataset size: 20 GB
-- Throughput sizing: 300,000 operations per second
+- Throughput sizing: 1,000,000 operations per second
 - Default Redis Cloud account payment method
 - TLS enabled
 - `noeviction`

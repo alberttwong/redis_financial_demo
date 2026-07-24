@@ -58,6 +58,15 @@ export async function getRedisClient(): Promise<RedisConnection> {
   return selected;
 }
 
+export async function disconnectRedisPool(): Promise<void> {
+  const pool = redisPoolState();
+  const clients = (pool.clientStates ?? []).flatMap((state) =>
+    state.client && state.client.isOpen ? [state.client] : []
+  );
+  await Promise.allSettled(clients.map((client) => client.disconnect()));
+  delete globalRedisPool.__lplRedisPool;
+}
+
 export function readRedisConnectionMetrics() {
   const config = getRedisConfig();
   const states = redisPoolState().clientStates ?? [];
