@@ -23,7 +23,7 @@ variable "region" {
 }
 
 variable "subscription_type" {
-  description = "Redis Cloud subscription family. Pro is the default target for the 20 GB / 180k ops/sec demo; Essentials remains available for smaller local demos."
+  description = "Redis Cloud subscription family. Pro is the default target for the 20 GB / 1M ops/sec benchmark; Essentials remains available for smaller local demos."
   type        = string
   default     = "pro"
 
@@ -100,7 +100,15 @@ variable "throughput_measurement_by" {
 variable "throughput_measurement_value" {
   description = "Redis Cloud Pro/Flexible throughput target. With operations-per-second, this is the requested ops/sec capacity."
   type        = number
-  default     = 300000
+  default     = 1000000
+
+  validation {
+    condition = (
+      var.throughput_measurement_by != "operations-per-second"
+      || (var.throughput_measurement_value > 0 && var.throughput_measurement_value <= 10000000)
+    )
+    error_message = "With operations-per-second measurement, throughput_measurement_value must be between 1 and the Redis Cloud per-database maximum of 10,000,000."
+  }
 }
 
 variable "support_oss_cluster_api" {

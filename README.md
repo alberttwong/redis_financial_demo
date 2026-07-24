@@ -314,7 +314,7 @@ QUERY_SAMPLE_POOL_SIZE=1000
 QUERY_RANDOM_SEED=20260714
 ```
 
-At the current implementation, 180,000 successful HTTP query requests/sec produce approximately 180,000 top-level Redis query commands/sec because every one of the 12 patterns uses one `JSON.GET` or one projected `FT.SEARCH`. The 30,000 write target adds 30,000 top-level `FCALL` commands/sec. The combined target is therefore approximately 210,000 client-visible Redis commands/sec before accounting for internal RedisJSON work performed by each Function. The repository now requests 300,000 operations/sec as a calibration floor, but Redis Cloud metrics from the isolated staircase tests are still required to confirm the final capacity because payload size and server-side work can make equal command counts consume very different resources.
+At the current implementation, 180,000 successful HTTP query requests/sec produce approximately 180,000 top-level Redis query commands/sec because every one of the 12 patterns uses one `JSON.GET` or one projected `FT.SEARCH`. The 30,000 write target adds 30,000 top-level `FCALL` commands/sec. The combined target is therefore approximately 210,000 client-visible Redis commands/sec before accounting for internal RedisJSON work performed by each Function. The repository now requests 1,000,000 operations/sec for the high-capacity scaling experiment, but this remains a sizing input rather than a measured result. Redis Cloud metrics from isolated staircase tests are still required to confirm usable capacity because payload size and server-side work can make equal command counts consume very different resources.
 
 Run a single pattern against its isolated API pool as a staircase before enabling autoscaling. Set `QUERY_STAIRCASE_TARGET_COUNT=1` for a direct target URL or to the active target count when the URL fronts a pool:
 
@@ -557,7 +557,7 @@ Terraform for Redis Cloud lives in `infra/redis-cloud`. Run it through `./terraf
 
 Use the Terraform `redis_url`, `redis_tls`, `redis_host`, `redis_port`, and `redis_password` outputs to build the ignored local `.env.local`. `redis_url` and `redis_password` are sensitive outputs; write them to the file rather than printing them in shared logs.
 
-The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 20 GB dataset size, and throughput sizing set to 300,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
+The Terraform default target is Redis Cloud Pro/Flexible in AWS `us-west-2`, provisioned with Redis 8.4, a 20 GB dataset size, and throughput sizing set to 1,000,000 operations per second. Terraform uses the Redis Cloud account's default payment method. The smaller Essentials path remains available by setting `subscription_type=essentials`.
 
 Set `support_oss_cluster_api=true` and
 `external_endpoint_for_oss_cluster_api=true` to expose the managed Redis Cloud
@@ -583,7 +583,7 @@ Moving an existing Terraform-managed Essentials database to the default Pro/Flex
 - Hot account-level join reads use materialized Redis JSON read models such as `acct-snapshot:{acct:<account_id>}`.
 - The full concurrent load-test target is 210,000 client operations per second: two joins at 45,000 HTTP requests/sec each, ten other queries at 9,000 HTTP requests/sec each, and 30,000 atomic trade writes/sec. The HTTP query portion totals 180,000 requests/sec and currently issues one top-level Redis command per request.
 - Runtime writes and the trade-write load test call one atomic `apply_transaction` Redis Function that updates the source transaction, current position, and account snapshot. Raw `JSON.SET` is reserved for historical batch loading and snapshot rebuilds.
-- The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 300,000 operations per second using the Redis Cloud account's default payment method.
+- The current Terraform defaults target Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 1,000,000 operations per second using the Redis Cloud account's default payment method.
 - Existing Terraform-managed Essentials resources are replaced when switching to the Pro/Flexible resource family; export or reseed demo data as needed.
 - Use the Terraform `redis_tls` output rather than assuming TLS mode; Pro/Flexible and Essentials deployments can differ.
 - Local `.env.local`, Terraform state, generated plan files, `.next`, `node_modules`, and benchmark outputs are intentionally ignored by git.

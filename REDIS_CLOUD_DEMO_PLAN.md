@@ -20,7 +20,7 @@ Defaults:
 - Subscription name: `lpl-redis-demo`
 - Database name: `lpl-query-patterns`
 - Dataset size: 20 GB
-- Throughput sizing: 300,000 operations per second
+- Throughput sizing: 1,000,000 operations per second
 - Endpoint access: public endpoint for local demo development. Use the Terraform `redis_tls` output to decide whether the app should use `redis://` or `rediss://`.
 - Eviction policy: `noeviction`, unless a later benchmark explicitly tests cache-style eviction
 
@@ -31,7 +31,7 @@ REDISCLOUD_ACCESS_KEY
 REDISCLOUD_SECRET_KEY
 ```
 
-The Terraform configuration should use Redis Cloud Pro/Flexible resources by default with `dataset_size_in_gb = 20`, `throughput_measurement_by = "operations-per-second"`, and `throughput_measurement_value = 300000`. Essentials should remain available as an explicit smaller-demo override, but Pro/Flexible is the default target for the performance demo.
+The Terraform configuration should use Redis Cloud Pro/Flexible resources by default with `dataset_size_in_gb = 20`, `throughput_measurement_by = "operations-per-second"`, and `throughput_measurement_value = 1000000`. Essentials should remain available as an explicit smaller-demo override, but Pro/Flexible is the default target for the performance demo.
 
 Switching an existing Terraform-managed Essentials deployment to the default Pro/Flexible resource family creates Pro/Flexible resources and removes the Essentials resources from that state. Export or reseed demo data before applying that replacement.
 
@@ -324,7 +324,7 @@ Unit and integration test coverage should include:
 - Redis Cloud is the only Redis runtime target.
 - Terraform provisions Redis Cloud infrastructure.
 - Terraform uses the Redis Cloud account's default payment method.
-- Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 300,000 operations per second is the default target.
+- Redis Cloud Pro/Flexible in AWS `us-west-2`, Redis 8.4, 20 GB dataset size, and 1,000,000 operations per second is the default target.
 - SQL remains the source of truth.
 - Redis receives batched table extracts, not streaming CDC, for this demo.
 - Account info documents are compact metadata rows without synthetic payloads and are returned in full for single-account reads.

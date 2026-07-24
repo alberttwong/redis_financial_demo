@@ -1,25 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
-import {
-  accountActivityJoin,
-  accountById,
-  accountPortfolioJoin,
-  accountSnapshot,
-  positionByComposite,
-  positionsByAccount,
-  securityById,
-  securityByNo,
-  transactionById,
-  transactionsByAccount,
-  transactionsByComposite,
-  transactionsSearch
-} from "@/lib/queries";
-import { isQueryPattern } from "@/lib/benchmark-samples";
+import { isQueryPattern, type QuerySample } from "@/lib/benchmark-samples";
 import { queryConcurrency } from "@/lib/query-concurrency";
 import {
   encodeQueryResponse,
   queryTimingHeaders,
   serializeQueryResponse
 } from "@/lib/query-response";
+import { runQueryPattern } from "@/lib/run-query-pattern";
 import { getApiWorkloadClass, queryWorkloadClass } from "@/lib/query-workloads";
 import { getRedisClient } from "@/lib/redis";
 
@@ -91,7 +78,13 @@ export async function GET(request: NextRequest) {
 
   try {
     const client = await getRedisClient();
-    const result = await runPattern(pattern, params, startedAt, client);
+    const result = await runQueryPattern(
+      pattern,
+      querySample(params),
+      startedAt,
+      client,
+      Number.parseInt(params.get("limit") ?? "100", 10)
+    );
     const serialized = serializeQueryResponse(result);
     const encoded = await encodeQueryResponse(
       serialized,
@@ -124,49 +117,13 @@ export async function GET(request: NextRequest) {
   }
 }
 
-async function runPattern(
-  pattern: string,
-  params: URLSearchParams,
-  startedAt: number,
-  client: Awaited<ReturnType<typeof getRedisClient>>
-) {
-  const accountId = params.get("account_id") ?? "A00000001";
-  const securityId = params.get("security_id") ?? "SEC00000001";
-  const securityNo = params.get("security_no") ?? "SPX000001";
-  const acctTypeCode = params.get("acct_type_code") ?? "CASH";
-  const tradeDate = params.get("trade_date") ?? new Date().toISOString().slice(0, 10);
-  const transactionId = params.get("transaction_id") ?? "sample-transaction-id";
-  const limit = Number.parseInt(params.get("limit") ?? "100", 10);
-  const ctx = { client, startedAt };
-
-  switch (pattern) {
-    case "accountById":
-      return accountById(ctx, accountId);
-    case "securityById":
-      return securityById(ctx, securityId);
-    case "securityByNo":
-      return securityByNo(ctx, securityNo);
-    case "positionByComposite":
-      return positionByComposite(ctx, accountId, securityNo, acctTypeCode);
-    case "positionsByAccount":
-      return positionsByAccount(ctx, accountId);
-    case "transactionById":
-      return transactionById(ctx, accountId, securityNo, acctTypeCode, transactionId);
-    case "transactionsByComposite":
-      return transactionsByComposite(ctx, accountId, securityId, tradeDate, acctTypeCode);
-    case "transactionsByAccount":
-      return transactionsByAccount(ctx, accountId, limit);
-    case "transactionsBySecurity":
-      return transactionsSearch(ctx, { securityId, limit });
-    case "transactionsByAccountSecurity":
-      return transactionsSearch(ctx, { accountId, securityId, limit });
-    case "accountPortfolioJoin":
-      return accountPortfolioJoin(ctx, accountId);
-    case "accountActivityJoin":
-      return accountActivityJoin(ctx, accountId);
-    case "accountSnapshot":
-      return accountSnapshot(ctx, accountId);
-    default:
-      throw new Error(`Unknown pattern: ${pattern}`);
-  }
+function querySample(params: URLSearchParams): QuerySample {
+  return {
+    account_id: params.get("account_id") ?? "A00000001",
+    security_id: params.get("security_id") ?? "SEC00000001",
+    security_no: params.get("security_no") ?? "SPX000001",
+    acct_type_code: params.get("acct_type_code") ?? "CASH",
+    trade_date: params.get("trade_date") ?? new Date().toISOString().slice(0, 10),
+    transaction_id: params.get("transaction_id") ?? "sample-transaction-id"
+  };
 }
