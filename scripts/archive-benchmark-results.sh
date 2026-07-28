@@ -5,11 +5,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_ROOT="${BENCHMARK_OUTPUT_DIR:-${REPO_ROOT}/memtier-output}"
 ARCHIVE_DATE="${BENCHMARK_ARCHIVE_DATE:-$(date -u +%Y-%m-%d)}"
+ARCHIVE_LABEL="${BENCHMARK_ARCHIVE_LABEL:-${ARCHIVE_DATE}}"
 BUCKET="${BENCHMARK_ARCHIVE_BUCKET:-lpl-redis-benchmark-rdb-20260722222753244900000001}"
-PREFIX="${BENCHMARK_ARCHIVE_PREFIX:-benchmark-results/raw/${ARCHIVE_DATE}}"
-STAGING_ROOT="${BENCHMARK_ARCHIVE_STAGING:-${TMPDIR:-/tmp}/lpl-benchmark-archive-${ARCHIVE_DATE}}"
+PREFIX="${BENCHMARK_ARCHIVE_PREFIX:-benchmark-results/raw/${ARCHIVE_LABEL}}"
+STAGING_ROOT="${BENCHMARK_ARCHIVE_STAGING:-${TMPDIR:-/tmp}/lpl-benchmark-archive-${ARCHIVE_LABEL}}"
 ARCHIVE_ROOT="${STAGING_ROOT}/archives"
-MANIFEST_PATH="${BENCHMARK_ARCHIVE_MANIFEST:-${REPO_ROOT}/docs/benchmark-results/archive-manifest-${ARCHIVE_DATE}.tsv}"
+SOURCE_MAP_PATH="${STAGING_ROOT}/archive-source-map.tsv"
+MANIFEST_PATH="${BENCHMARK_ARCHIVE_MANIFEST:-${REPO_ROOT}/docs/benchmark-results/archive-manifest-${ARCHIVE_LABEL}.tsv}"
 MODE="${1:-all}"
 
 usage() {
@@ -60,27 +62,78 @@ scan_for_secrets() {
   fi
 }
 
+record_archive() {
+  local archive="$1"
+  local source_path="$2"
+  local relative="${archive#${ARCHIVE_ROOT}/}"
+  printf '%s\t%s\n' "${relative}" "${source_path}" >>"${SOURCE_MAP_PATH}"
+}
+
+create_archive() {
+  local archive="$1"
+  shift
+  tar -cf - -C "${SOURCE_ROOT}" "$@" | gzip -n >"${archive}"
+}
+
 write_manifest() {
   mkdir -p "$(dirname "${MANIFEST_PATH}")"
   {
     printf 'sha256\tbytes\tsource_path\ts3_uri\n'
-    while IFS= read -r -d '' archive; do
-      relative="${archive#${ARCHIVE_ROOT}/}"
-      source_path="${relative%.tar.gz}"
-      source_path="${source_path/__//}"
+    while IFS=$'\t' read -r relative source_path; do
+      archive="${ARCHIVE_ROOT}/${relative}"
       sha256="$(shasum -a 256 "${archive}" | awk '{print $1}')"
       bytes="$(file_size_bytes "${archive}")"
       printf '%s\t%s\t%s\t%s\n' \
         "${sha256}" \
         "${bytes}" \
-        "memtier-output/${source_path}" \
+        "${source_path}" \
         "s3://${BUCKET}/${PREFIX}/${relative}"
-    done < <(find "${ARCHIVE_ROOT}" -type f -name '*.tar.gz' -print0 | sort -z)
+    done < <(sort "${SOURCE_MAP_PATH}")
   } >"${MANIFEST_PATH}"
+}
+
+verify_package_coverage() {
+  local archived_files="${STAGING_ROOT}/archived-files.txt"
+  local local_files="${STAGING_ROOT}/local-files.txt"
+  local duplicate_files="${STAGING_ROOT}/duplicate-archive-files.txt"
+  local coverage_differences="${STAGING_ROOT}/archive-coverage-differences.txt"
+
+  find "${ARCHIVE_ROOT}" -type f -name '*.tar.gz' -print0 |
+    while IFS= read -r -d '' archive; do
+      tar -tzf "${archive}"
+    done |
+    sed '/\/$/d' |
+    sort >"${archived_files}"
+
+  find "${SOURCE_ROOT}" -type f -print0 |
+    while IFS= read -r -d '' source_file; do
+      printf '%s\n' "${source_file#${SOURCE_ROOT}/}"
+    done |
+    sort >"${local_files}"
+
+  uniq -d "${archived_files}" >"${duplicate_files}"
+  comm -3 "${archived_files}" "${local_files}" >"${coverage_differences}"
+
+  if [[ -s "${duplicate_files}" || -s "${coverage_differences}" ]]; then
+    echo "Archive source coverage verification failed." >&2
+    if [[ -s "${duplicate_files}" ]]; then
+      echo "Paths packaged more than once:" >&2
+      sed -n '1,20p' "${duplicate_files}" >&2
+    fi
+    if [[ -s "${coverage_differences}" ]]; then
+      echo "Paths missing from either the archive or source:" >&2
+      sed -n '1,20p' "${coverage_differences}" >&2
+    fi
+    exit 1
+  fi
+
+  covered_files="$(wc -l <"${local_files}" | tr -d ' ')"
+  echo "Verified package coverage: ${covered_files} of ${covered_files} source files, with no duplicates."
 }
 
 package_results() {
   require_command rg
+  require_command gzip
   require_command shasum
   require_command tar
 
@@ -92,6 +145,7 @@ package_results() {
   scan_for_secrets
   rm -rf "${ARCHIVE_ROOT}"
   mkdir -p "${ARCHIVE_ROOT}"
+  : >"${SOURCE_MAP_PATH}"
 
   for family in aws-load-runner aws-direct-redis; do
     family_root="${SOURCE_ROOT}/${family}"
@@ -101,21 +155,49 @@ package_results() {
     while IFS= read -r -d '' run_dir; do
       run_name="$(basename "${run_dir}")"
       archive="${ARCHIVE_ROOT}/${family}/${run_name}.tar.gz"
-      tar -czf "${archive}" -C "${SOURCE_ROOT}" "${family}/${run_name}"
+      create_archive "${archive}" "${family}/${run_name}"
+      record_archive "${archive}" "memtier-output/${family}/${run_name}"
     done < <(find "${family_root}" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+
+    family_files=()
+    while IFS= read -r -d '' family_file; do
+      family_files+=("${family}/$(basename "${family_file}")")
+    done < <(find "${family_root}" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
+
+    if (( ${#family_files[@]} > 0 )); then
+      archive="${ARCHIVE_ROOT}/${family}/_root-files.tar.gz"
+      create_archive "${archive}" "${family_files[@]}"
+      record_archive "${archive}" "memtier-output/${family}/* (files only)"
+    fi
   done
 
   mkdir -p "${ARCHIVE_ROOT}/misc"
+  while IFS= read -r -d '' top_level_dir; do
+    top_level_name="$(basename "${top_level_dir}")"
+    case "${top_level_name}" in
+      aws-load-runner | aws-direct-redis)
+        continue
+        ;;
+    esac
+
+    archive="${ARCHIVE_ROOT}/misc/${top_level_name}.tar.gz"
+    create_archive "${archive}" "${top_level_name}"
+    record_archive "${archive}" "memtier-output/${top_level_name}"
+  done < <(find "${SOURCE_ROOT}" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+
   root_files=()
   while IFS= read -r -d '' root_file; do
     root_files+=("$(basename "${root_file}")")
   done < <(find "${SOURCE_ROOT}" -mindepth 1 -maxdepth 1 -type f -print0 | sort -z)
 
   if (( ${#root_files[@]} > 0 )); then
-    tar -czf "${ARCHIVE_ROOT}/misc/root-files.tar.gz" -C "${SOURCE_ROOT}" "${root_files[@]}"
+    archive="${ARCHIVE_ROOT}/misc/root-files.tar.gz"
+    create_archive "${archive}" "${root_files[@]}"
+    record_archive "${archive}" "memtier-output/* (files only)"
   fi
 
   write_manifest
+  verify_package_coverage
   archive_count="$(find "${ARCHIVE_ROOT}" -type f -name '*.tar.gz' | wc -l | tr -d ' ')"
   archive_bytes="$(archive_size_bytes)"
   echo "Packaged ${archive_count} archives (${archive_bytes} bytes)."

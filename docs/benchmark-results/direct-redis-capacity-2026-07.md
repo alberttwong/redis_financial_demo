@@ -55,7 +55,7 @@ is the fleet total over the window.
 The checksummed raw archives and CloudWatch per-instance CSV are stored under:
 
 ```text
-s3://lpl-redis-benchmark-rdb-20260722222753244900000001/benchmark-results/raw/2026-07-28/
+s3://lpl-redis-benchmark-rdb-20260722222753244900000001/benchmark-results/raw/2026-07-28-complete/
 ```
 
 See [Benchmark Result Storage](README.md) for the authoritative run mapping and

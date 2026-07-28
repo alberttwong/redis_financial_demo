@@ -12,13 +12,16 @@ Benchmark evidence uses two storage tiers:
 
 The raw artifacts are packaged one archive per run. This avoids adding the
 current 1.2 GB and more than 10,000 generated files to Git, while retaining
-enough isolation to retrieve a single experiment. The 2026-07-28 archive
-contains **73 run archives totaling 76,573,354 bytes** after compression.
+enough isolation to retrieve a single experiment.
+
+The corrected 2026-07-28 complete archive contains **76 archives totaling
+76,638,641 bytes** after compression. Package verification confirmed that all
+**10,343 of 10,343 source files** are represented exactly once.
 
 ## Retained S3 location
 
 ```text
-s3://lpl-redis-benchmark-rdb-20260722222753244900000001/benchmark-results/raw/2026-07-28/
+s3://lpl-redis-benchmark-rdb-20260722222753244900000001/benchmark-results/raw/2026-07-28-complete/
 ```
 
 The bucket has versioning enabled, default AES-256 server-side encryption, and
@@ -29,6 +32,22 @@ At approximately 1.2 GB before compression and 76.6 MB after compression, the
 retained evidence is small enough to favor immediate retrieval and operational
 simplicity over a colder class with retrieval fees and minimum-duration
 charges.
+
+The `2026-07-28-complete` snapshot supersedes the earlier `2026-07-28`
+benchmark snapshot. The earlier snapshot remains unchanged for audit history,
+but it omitted loose runner files and two top-level evidence directories.
+
+## Coverage model
+
+The archiver stores:
+
+- each run directory under `aws-load-runner/` and `aws-direct-redis/` as an
+  independently retrievable archive;
+- loose files at the root of each runner family in a `_root-files` archive;
+- every other top-level benchmark directory as its own archive; and
+- files directly under `memtier-output/` in `misc/root-files.tar.gz`.
+
+Packaging fails if any source file is omitted or included more than once.
 
 ## Authoritative run index
 
@@ -56,7 +75,7 @@ they contain the 12-query read mix and no trade writes.
 ```bash
 aws s3api get-object \
   --bucket lpl-redis-benchmark-rdb-20260722222753244900000001 \
-  --key benchmark-results/raw/2026-07-28/aws-load-runner/concurrent-18-hosts-full-load-20260723T185750Z.tar.gz \
+  --key benchmark-results/raw/2026-07-28-complete/aws-load-runner/concurrent-18-hosts-full-load-20260723T185750Z.tar.gz \
   --checksum-mode ENABLED \
   /tmp/concurrent-18-hosts-full-load-20260723T185750Z.tar.gz
 
@@ -64,7 +83,8 @@ shasum -a 256 /tmp/concurrent-18-hosts-full-load-20260723T185750Z.tar.gz
 ```
 
 Compare the result with
-[`archive-manifest-2026-07-28.tsv`](archive-manifest-2026-07-28.tsv), then
+[`archive-manifest-2026-07-28-complete.tsv`](archive-manifest-2026-07-28-complete.tsv),
+then
 extract the archive:
 
 ```bash
@@ -83,12 +103,13 @@ The command:
 
 - scans the generated output for common credential patterns;
 - packages each run separately;
+- verifies that every source file is packaged exactly once;
 - generates a SHA-256 manifest;
 - uploads with S3 checksum validation and AES-256 encryption; and
 - verifies object count, total bytes, every stored checksum, encryption, and the
   uploaded manifest.
 
-Set `BENCHMARK_ARCHIVE_DATE` and `BENCHMARK_ARCHIVE_PREFIX` to publish under a
-different date-scoped prefix. The uploader skips byte-identical existing
-objects and refuses to overwrite different content under an existing key. The
-command never deletes S3 objects.
+Set `BENCHMARK_ARCHIVE_LABEL` to publish under a different date-scoped label
+and prefix, such as `2026-07-29-complete`. The uploader skips byte-identical
+existing objects and refuses to overwrite different content under an existing
+key. The command never deletes S3 objects.
