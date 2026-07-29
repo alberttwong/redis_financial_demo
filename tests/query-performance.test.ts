@@ -5,7 +5,10 @@ import {
   accountActivityJoin,
   accountPortfolioJoin,
   positionsByAccount,
-  transactionsByAccount
+  securityByNoDirect,
+  transactionsByAccount,
+  transactionsByAccountSecurityMaterialized,
+  transactionsBySecurityMaterialized
 } from "../src/lib/queries";
 import type {
   AccountRow,
@@ -178,4 +181,71 @@ test("transactionsByAccount uses the bounded recent snapshot and preserves the c
   assert.equal(result.redis_command_count, 1);
   assert.equal(result.result_count, 1);
   assert.deepEqual(result.data, transactions.map(({ security: _security, ...transaction }) => transaction));
+});
+
+test("securityByNoDirect reads the materialized direct lookup with one command", async () => {
+  const commands: string[][] = [];
+  const client = {
+    async sendCommand(input: string[]) {
+      commands.push(input);
+      return JSON.stringify([security]);
+    }
+  } as unknown as RedisClientType;
+
+  const result = await securityByNoDirect({ client }, "SPX1");
+
+  assert.deepEqual(commands, [[
+    "JSON.GET",
+    "query-view:security-by-no:{security-no:SPX1}",
+    "$"
+  ]]);
+  assert.equal(result.redis_command_count, 1);
+  assert.deepEqual(result.data, [security]);
+});
+
+test("transactionsBySecurityMaterialized reads the bounded view with one command", async () => {
+  const commands: string[][] = [];
+  const compactTransactions = transactions.map(({ security: _security, ...transaction }) => transaction);
+  const client = {
+    async sendCommand(input: string[]) {
+      commands.push(input);
+      return projectedReply({ transactions: compactTransactions });
+    }
+  } as unknown as RedisClientType;
+
+  const result = await transactionsBySecurityMaterialized({ client }, "SEC1", 100);
+
+  assert.deepEqual(commands, [[
+    "JSON.GET",
+    "query-view:transactions-by-security:{security:SEC1}",
+    "$.transactions"
+  ]]);
+  assert.equal(result.redis_command_count, 1);
+  assert.deepEqual(result.data, compactTransactions);
+});
+
+test("transactionsByAccountSecurityMaterialized uses the account hash slot", async () => {
+  const commands: string[][] = [];
+  const compactTransactions = transactions.map(({ security: _security, ...transaction }) => transaction);
+  const client = {
+    async sendCommand(input: string[]) {
+      commands.push(input);
+      return projectedReply({ transactions: compactTransactions });
+    }
+  } as unknown as RedisClientType;
+
+  const result = await transactionsByAccountSecurityMaterialized(
+    { client },
+    "A1",
+    "SEC1",
+    100
+  );
+
+  assert.deepEqual(commands, [[
+    "JSON.GET",
+    "query-view:transactions-by-account-security:{acct:A1}:SEC1",
+    "$.transactions"
+  ]]);
+  assert.equal(result.redis_command_count, 1);
+  assert.deepEqual(result.data, compactTransactions);
 });

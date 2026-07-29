@@ -34,6 +34,11 @@ test("concurrent summary merges Redis timing histograms across generator shards"
     const query = summary.queries[0];
     assert.equal(query.target_per_second, 20);
     assert.equal(query.achieved_per_second, 18);
+    assert.equal(query.queue_timing_samples, 4);
+    assert.equal(query.queue_timing_missing_samples, 0);
+    assert.equal(query.queue_p50_latency_ms, 1);
+    assert.equal(query.queue_p95_latency_ms, 2);
+    assert.equal(query.queue_p99_latency_ms, 2);
     assert.equal(query.redis_timing_samples, 4);
     assert.equal(query.redis_timing_missing_samples, 1);
     assert.equal(query.redis_p50_latency_ms, 2);
@@ -44,6 +49,7 @@ test("concurrent summary merges Redis timing histograms across generator shards"
       path.join(outputDirectory, "concurrent-query-summary.md"),
       "utf8"
     );
+    assert.match(markdown, /API queue p50\/p95\/p99 ms/);
     assert.match(markdown, /Redis p50\/p95\/p99 ms/);
     assert.match(markdown, /4 \/ 1/);
   } finally {
@@ -68,6 +74,17 @@ function queryFixture(
     successful_response_megabytes_per_second: 0.001,
     socket_queue_ms: { p95: 1 },
     latency_histogram_ms: [[5, 2]],
+    queue_latency_ms: {
+      samples: 2,
+      p50: redisHistogram[0][0] - 1,
+      p95: redisHistogram.at(-1)?.[0] ?? 0,
+      p99: redisHistogram.at(-1)?.[0] ?? 0,
+      p99_9: redisHistogram.at(-1)?.[0] ?? 0
+    },
+    queue_timing_missing_samples: 0,
+    queue_latency_histogram_ms: redisHistogram.map(
+      ([latency, count]) => [Math.max(0, latency - 1), count] as [number, number]
+    ),
     socket_queue_histogram_ms: [[1, 2]],
     latency_ms: { p50: 5, p95: 5, p99: 5, p99_9: 5 },
     redis_latency_ms: {

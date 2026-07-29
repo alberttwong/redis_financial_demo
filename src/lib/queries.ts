@@ -5,9 +5,12 @@ import { jsonGet, jsonGetFields } from "./json";
 import {
   accountKey,
   positionKey,
+  securityByNoViewKey,
   securityKey,
   snapshotKey,
-  transactionKey
+  transactionKey,
+  transactionsByAccountSecurityViewKey,
+  transactionsBySecurityViewKey
 } from "./keys";
 import {
   POSITION_PROJECTION_FIELDS,
@@ -37,6 +40,7 @@ type QueryContext = {
 
 function emptyTimings(): Timings {
   return {
+    queue_ms: 0,
     redis_ms: 0,
     search_ms: 0,
     hydrate_ms: 0,
@@ -99,6 +103,19 @@ export async function securityByNo(
   return response(startedAt, data, timing, data.length, 1, [
     `FT.SEARCH ${INDEXES.securities} "${query}" RETURN <projected-fields> LIMIT 0 20 DIALECT 2`
   ]);
+}
+
+export async function securityByNoDirect(
+  ctx: QueryContext,
+  securityNo: string
+): Promise<QueryResult<SecurityProjection[]>> {
+  const startedAt = ctx.startedAt ?? performance.now();
+  const timing = emptyTimings();
+  const key = securityByNoViewKey(securityNo);
+  const direct = await measure(() => jsonGet<SecurityProjection>(ctx.client, key));
+  timing.redis_ms = direct.ms;
+  if (!direct.value) throw missingQueryViewError(key);
+  return response(startedAt, [direct.value], timing, 1, 1, [`JSON.GET ${key} $`]);
 }
 
 export async function positionByComposite(
@@ -258,6 +275,37 @@ export async function transactionsByAccount(
   ]);
 }
 
+type MaterializedTransactionView = {
+  generated_at: string;
+  source_pattern: "transactionsBySecurity" | "transactionsByAccountSecurity";
+  transactions: TransactionProjection[];
+};
+
+export async function transactionsBySecurityMaterialized(
+  ctx: QueryContext,
+  securityId: string,
+  limit = 100
+): Promise<QueryResult<TransactionProjection[]>> {
+  return materializedTransactions(
+    ctx,
+    transactionsBySecurityViewKey(securityId),
+    limit
+  );
+}
+
+export async function transactionsByAccountSecurityMaterialized(
+  ctx: QueryContext,
+  accountId: string,
+  securityId: string,
+  limit = 100
+): Promise<QueryResult<TransactionProjection[]>> {
+  return materializedTransactions(
+    ctx,
+    transactionsByAccountSecurityViewKey(accountId, securityId),
+    limit
+  );
+}
+
 export async function accountPortfolioJoin(ctx: QueryContext, accountId: string): Promise<QueryResult<unknown>> {
   const startedAt = ctx.startedAt ?? performance.now();
   const timing = emptyTimings();
@@ -341,4 +389,33 @@ function withoutSecurity<T extends { security?: SecurityProjection }>(
 ): Omit<T, "security"> {
   const { security: _security, ...projection } = value;
   return projection;
+}
+
+async function materializedTransactions(
+  ctx: QueryContext,
+  key: string,
+  limit: number
+): Promise<QueryResult<TransactionProjection[]>> {
+  const startedAt = ctx.startedAt ?? performance.now();
+  const timing = emptyTimings();
+  const projected = await measure(() =>
+    jsonGetFields<Pick<MaterializedTransactionView, "transactions">>(
+      ctx.client,
+      key,
+      ["transactions"]
+    )
+  );
+  timing.redis_ms = projected.ms;
+  if (!projected.value) throw missingQueryViewError(key);
+  const boundedLimit = Math.max(0, Math.min(limit, 200));
+  const data = projected.value.transactions.slice(0, boundedLimit);
+  return response(startedAt, data, timing, data.length, 1, [
+    `JSON.GET ${key} $.transactions`
+  ]);
+}
+
+function missingQueryViewError(key: string): Error {
+  return new Error(
+    `Materialized comparison view ${key} is missing; run npm run materialize:query-comparison before the comparison benchmark`
+  );
 }

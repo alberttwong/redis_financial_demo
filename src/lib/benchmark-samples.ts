@@ -6,19 +6,55 @@ export const QUERY_PATTERNS = [
   "accountById",
   "securityById",
   "securityByNo",
+  "securityByNoDirect",
   "positionByComposite",
   "positionsByAccount",
   "transactionById",
   "transactionsByComposite",
   "transactionsByAccount",
   "transactionsBySecurity",
+  "transactionsBySecurityMaterialized",
   "transactionsByAccountSecurity",
+  "transactionsByAccountSecurityMaterialized",
   "accountPortfolioJoin",
   "accountActivityJoin",
   "accountSnapshot"
 ] as const;
 
 export type QueryPattern = (typeof QUERY_PATTERNS)[number];
+
+export const QUERY_COMPARISON_PAIRS = {
+  securityByNo: "securityByNoDirect",
+  transactionsBySecurity: "transactionsBySecurityMaterialized",
+  transactionsByAccountSecurity: "transactionsByAccountSecurityMaterialized"
+} as const satisfies Partial<Record<QueryPattern, QueryPattern>>;
+
+export type BaselineComparisonQueryPattern = keyof typeof QUERY_COMPARISON_PAIRS;
+export type OptimizedComparisonQueryPattern =
+  (typeof QUERY_COMPARISON_PAIRS)[BaselineComparisonQueryPattern];
+export type BaselineQueryPattern = Exclude<
+  QueryPattern,
+  OptimizedComparisonQueryPattern
+>;
+
+const BASELINE_PATTERN_BY_COMPARISON_PATTERN = new Map<
+  QueryPattern,
+  BaselineQueryPattern
+>(
+  Object.entries(QUERY_COMPARISON_PAIRS).flatMap(([baseline, optimized]) => [
+    [baseline as QueryPattern, baseline as BaselineQueryPattern],
+    [optimized, baseline as BaselineQueryPattern]
+  ])
+);
+
+export function baselineQueryPattern(
+  pattern: QueryPattern
+): BaselineQueryPattern {
+  return (
+    BASELINE_PATTERN_BY_COMPARISON_PATTERN.get(pattern) ??
+    (pattern as BaselineQueryPattern)
+  );
+}
 
 export type SecuritySample = {
   security_id: string;
@@ -97,7 +133,7 @@ export function selectQuerySample(
   const transaction = choose(pool.transactions, random);
   const base: QuerySample = { ...transaction };
 
-  switch (pattern) {
+  switch (baselineQueryPattern(pattern)) {
     case "accountById":
     case "positionsByAccount":
     case "accountPortfolioJoin":

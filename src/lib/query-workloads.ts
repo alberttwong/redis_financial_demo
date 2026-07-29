@@ -1,13 +1,19 @@
 import type { QueryPattern } from "./benchmark-samples";
 
-export const LIGHT_QUERY_PATTERNS = [
+export const DIRECT_KEY_QUERY_PATTERNS = [
   "accountById",
   "securityById",
-  "securityByNo",
   "positionByComposite",
-  "transactionById",
+  "transactionById"
+] as const satisfies readonly QueryPattern[];
+
+export const LIGHT_QUERY_PATTERNS = [
+  ...DIRECT_KEY_QUERY_PATTERNS,
+  "securityByNo",
+  "securityByNoDirect",
   "transactionsByComposite",
-  "transactionsByAccountSecurity"
+  "transactionsByAccountSecurity",
+  "transactionsByAccountSecurityMaterialized"
 ] as const satisfies readonly QueryPattern[];
 
 export const POSITIONS_QUERY_PATTERNS = [
@@ -16,7 +22,8 @@ export const POSITIONS_QUERY_PATTERNS = [
 
 export const TRANSACTION_COLLECTION_QUERY_PATTERNS = [
   "transactionsByAccount",
-  "transactionsBySecurity"
+  "transactionsBySecurity",
+  "transactionsBySecurityMaterialized"
 ] as const satisfies readonly QueryPattern[];
 
 export const PORTFOLIO_QUERY_PATTERNS = [
@@ -42,6 +49,7 @@ export const QUERY_WORKLOAD_POOLS = [
 
 export type QueryWorkloadClass = (typeof QUERY_WORKLOAD_POOLS)[number];
 export type ApiWorkloadClass = QueryWorkloadClass | "mixed";
+export type DirectKeyQueryPattern = (typeof DIRECT_KEY_QUERY_PATTERNS)[number];
 
 export const QUERY_PATTERNS_BY_WORKLOAD_POOL = {
   light: LIGHT_QUERY_PATTERNS,
@@ -71,6 +79,12 @@ export function queryWorkloadClass(pattern: QueryPattern): QueryWorkloadClass {
   const pool = WORKLOAD_POOL_BY_PATTERN.get(pattern);
   if (!pool) throw new Error(`Query pattern ${pattern} has no workload pool`);
   return pool;
+}
+
+const DIRECT_KEY_QUERY_PATTERN_SET = new Set<QueryPattern>(DIRECT_KEY_QUERY_PATTERNS);
+
+export function isDirectKeyQueryPattern(pattern: QueryPattern): pattern is DirectKeyQueryPattern {
+  return DIRECT_KEY_QUERY_PATTERN_SET.has(pattern);
 }
 
 export function parseApiWorkloadClass(value: string | undefined): ApiWorkloadClass {

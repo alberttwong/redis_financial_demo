@@ -73,6 +73,7 @@ export type AccountSnapshot = {
 };
 
 export type Timings = {
+  queue_ms: number;
   redis_ms: number;
   search_ms: number;
   hydrate_ms: number;

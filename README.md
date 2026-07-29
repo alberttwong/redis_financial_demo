@@ -46,13 +46,16 @@ The browser workbench at `/` calls `/api/query` with a `pattern` parameter. It s
 | Primary | `accountById` | Account by ID | `account_id` | `JSON.GET acct:{acct:<account_id>}:info $` |
 | Primary | `securityById` | Security by ID | `security_id` | `JSON.GET sec:<security_id>:info $` |
 | Secondary | `securityByNo` | Security by No | `security_no` | One projected `FT.SEARCH idx:securities @security_no:{...}` |
+| Comparison | `securityByNoDirect` | Security by No (direct comparison) | `security_no` | `JSON.GET query-view:security-by-no:{...} $` |
 | Primary | `positionByComposite` | Position composite | `account_id`, `security_no`, `acct_type_code` | `JSON.GET pos:{acct:<account_id>}:<security_no>:<acct_type_code> $` |
 | Secondary | `positionsByAccount` | Positions by account | `account_id` | One projected `FT.SEARCH idx:positions @account_id:{...} LIMIT 0 500` |
 | Primary | `transactionById` | Transaction by ID | `account_id`, `security_no`, `acct_type_code`, `transaction_id` | `JSON.GET txn:{acct:<account_id>}:<security_no>:<acct_type_code>:<transaction_id> $` |
 | Secondary | `transactionsByComposite` | Transactions by composite | `account_id`, `security_id`, `trade_date`, `acct_type_code` | One projected `FT.SEARCH idx:transactions` across the four indexed fields |
 | Secondary | `transactionsByAccount` | Transactions by account | `account_id`, `limit` | One projected `FT.SEARCH idx:transactions @account_id:{...}` |
 | Secondary | `transactionsBySecurity` | Transactions by security | `security_id`, `limit` | One projected `FT.SEARCH idx:transactions @security_id:{...}` |
+| Comparison | `transactionsBySecurityMaterialized` | Transactions by security (materialized comparison) | `security_id`, `limit` | `JSON.GET query-view:transactions-by-security:{...} $.transactions` |
 | Secondary | `transactionsByAccountSecurity` | Transactions by account + security | `account_id`, `security_id`, `limit` | One projected `FT.SEARCH idx:transactions @account_id:{...} @security_id:{...}` |
+| Comparison | `transactionsByAccountSecurityMaterialized` | Transactions by account + security (materialized comparison) | `account_id`, `security_id`, `limit` | `JSON.GET query-view:transactions-by-account-security:{acct:<account_id>}:... $.transactions` |
 | Join | `accountPortfolioJoin` | Account portfolio join | `account_id` | One projected `JSON.GET acct-snapshot:{acct:<account_id>} $.account $.positions` |
 | Join | `accountActivityJoin` | Account activity join | `account_id` | One projected `JSON.GET acct-snapshot:{acct:<account_id>} $.account $.recent_transactions` |
 | Read model | `accountSnapshot` | Materialized account snapshot | `account_id` | One projected `JSON.GET acct-snapshot:{acct:<account_id>} ...` |
@@ -63,7 +66,19 @@ The API accepts:
 /api/query?pattern=<pattern>&account_id=...&security_id=...&security_no=...&acct_type_code=...&trade_date=...&transaction_id=...&limit=100
 ```
 
-Responses include `data`, `timing`, `result_count`, `payload_bytes`, and the Redis `commands` used for the query.
+Responses include `data`, `timing`, `result_count`, `payload_bytes`, and the Redis `commands` used for the query. Timing reports admission queue time separately as `queue_ms`; successful responses also expose `Server-Timing: queue;dur=..., redis;dur=...`, `x-query-queue-ms`, and `x-redis-ms`.
+
+### Baseline versus optimized query comparison
+
+The three comparison patterns are additive: the existing `FT.SEARCH` patterns remain unchanged. The comparison views contain the same projected, date-sorted rows as their baseline query at materialization time. Prepare the sampled views and run all three baseline/optimized pairs concurrently with:
+
+```sh
+npm run bench:query:comparison
+```
+
+The comparison command defaults to 100 requests/sec for each of the six query patterns, persists one shared sample pool so both members of every pair use the same deterministic key sequence, keeps each optimized pattern in the same admission pool and lane as its baseline, and disables trade writes so view freshness cannot confound the latency result. It writes `query-comparison-summary.json` and `query-comparison-summary.md` alongside the six raw query result files.
+
+Use `QUERY_COMPARISON_TARGET_RPS` to raise the equal per-pattern rate. `QUERY_VIEW_SAMPLE_POOL_SIZE` must be at least `QUERY_SAMPLE_POOL_SIZE`. The view builder stores the same 100 recent projected transactions requested by the comparison, with an optional maximum of 200 through `QUERY_VIEW_TRANSACTION_LIMIT`. Set `QUERY_COMPARISON_PREPARE_VIEWS=0` only when reusing already-built views for the same sample pool.
 
 ## Atomic Transaction Writes
 
@@ -297,7 +312,7 @@ npm run bench:concurrent
 
 The newer `transactionsByComposite` UI pattern remains available in the workbench but is not part of this 12-query concurrent profile.
 
-Each query runner obtains a Redis-backed pool of valid seeded identifiers from `/api/samples?count=<n>` and selects a new pattern-appropriate sample for every request. Account reads spread across account IDs, security reads use valid securities, and composite position/transaction reads preserve correlated key fields. Persistent HTTP connections are reused, and each runner writes HTTP request rate, estimated Redis command rate, latency percentiles, errors, response throughput, random seed, sample-pool sizes, and the number of distinct keys actually exercised to `memtier-output/query-<pattern>.json`. Successful query responses expose Redis command duration through both `Server-Timing: redis;dur=<milliseconds>` and `x-redis-ms`; the generators record Redis-only p50/p95/p99 separately from end-to-end HTTP latency and count successful responses missing timing telemetry. Every concurrent run also writes `concurrent-query-summary.json` and `concurrent-query-summary.md` with target/sec, achieved/sec, HTTP latency, and Redis latency for each query, merging sparse histograms across generator shards. `x-redis-command-count` reports how many Redis commands each successful HTTP request issued. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
+Each query runner obtains a Redis-backed pool of valid seeded identifiers from `/api/samples?count=<n>` and selects a new pattern-appropriate sample for every request. Account reads spread across account IDs, security reads use valid securities, and composite position/transaction reads preserve correlated key fields. Persistent HTTP connections are reused, and each runner writes HTTP request rate, estimated Redis command rate, latency percentiles, errors, response throughput, random seed, sample-pool sizes, and the number of distinct keys actually exercised to `memtier-output/query-<pattern>.json`. Successful query responses expose admission queue time and Redis command duration through `Server-Timing`, `x-query-queue-ms`, and `x-redis-ms`; the generators record API-queue and Redis-only p50/p95/p99 separately from end-to-end HTTP latency and count missing timing telemetry. Every concurrent run also writes `concurrent-query-summary.json` and `concurrent-query-summary.md` with target/sec, achieved/sec, HTTP latency, API queue latency, and Redis latency for each query, merging sparse histograms across generator shards. `x-redis-command-count` reports how many Redis commands each successful HTTP request issued. The scheduler reports dropped requests when the configured in-flight limit prevents it from offering the full target.
 
 Useful tuning knobs:
 

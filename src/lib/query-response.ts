@@ -17,13 +17,20 @@ export type EncodedQueryResponse = {
   wireBytes: number;
 };
 
-export function queryTimingHeaders(timing: Pick<Timings, "redis_ms">): Record<string, string> {
+export function queryTimingHeaders(
+  timing: Pick<Timings, "queue_ms" | "redis_ms">
+): Record<string, string> {
+  if (!Number.isFinite(timing.queue_ms) || timing.queue_ms < 0) {
+    throw new Error("Queue timing must be a finite non-negative number");
+  }
   if (!Number.isFinite(timing.redis_ms) || timing.redis_ms < 0) {
     throw new Error("Redis timing must be a finite non-negative number");
   }
+  const queueMs = String(timing.queue_ms);
   const redisMs = String(timing.redis_ms);
   return {
-    "server-timing": `redis;dur=${redisMs}`,
+    "server-timing": `queue;dur=${queueMs}, redis;dur=${redisMs}`,
+    "x-query-queue-ms": queueMs,
     "x-redis-ms": redisMs
   };
 }
