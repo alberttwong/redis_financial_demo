@@ -43,20 +43,33 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const admission = queryConcurrency.acquire(pattern);
+  const admission = await queryConcurrency.acquire(pattern, request.signal);
   const admissionHeaders = {
     ...workloadHeaders,
+    "x-query-admission-lane": admission.admissionLane,
     "x-query-concurrency-active": String(admission.poolActive),
     "x-query-concurrency-limit": String(admission.poolLimit),
     "x-query-pattern-concurrency-active": String(admission.patternActive),
     "x-query-pattern-concurrency-limit": String(admission.patternReservation),
     "x-query-pattern-concurrency-reservation": String(admission.patternReservation),
-    "x-query-pattern-concurrency-borrowed": String(admission.patternBorrowed)
+    "x-query-pattern-concurrency-borrowed": String(admission.patternBorrowed),
+    "x-query-queue-depth": String(admission.queueDepth),
+    "x-query-queue-limit": String(admission.queueLimit),
+    "x-query-queue-ms": String(admission.queueMs),
+    "x-direct-key-concurrency-active": String(admission.directKeyActive),
+    "x-direct-key-concurrency-reserved": String(admission.directKeyReserved),
+    "x-direct-key-queue-depth": String(admission.directKeyQueued),
+    "x-direct-key-queue-limit": String(admission.directKeyQueueLimit)
   };
   if (!admission.accepted) {
     return NextResponse.json(
       {
-        error: `${queryClass} pool concurrency limit reached`,
+        error:
+          admission.rejectedBy === "queue-timeout"
+            ? `${queryClass} query queue wait limit reached`
+            : admission.rejectedBy === "request-aborted"
+              ? "Request was aborted while waiting for query capacity"
+              : `${queryClass} query queue is full`,
         pattern,
         query_workload_class: queryClass,
         rejected_by: admission.rejectedBy,
@@ -64,7 +77,10 @@ export async function GET(request: NextRequest) {
         pool_limit: admission.poolLimit,
         pattern_active: admission.patternActive,
         pattern_reservation: admission.patternReservation,
-        pattern_borrowed: admission.patternBorrowed
+        pattern_borrowed: admission.patternBorrowed,
+        queue_ms: admission.queueMs,
+        queue_depth: admission.queueDepth,
+        queue_limit: admission.queueLimit
       },
       {
         status: 429,
@@ -85,6 +101,7 @@ export async function GET(request: NextRequest) {
       client,
       Number.parseInt(params.get("limit") ?? "100", 10)
     );
+    result.timing.queue_ms = admission.queueMs;
     const serialized = serializeQueryResponse(result);
     const encoded = await encodeQueryResponse(
       serialized,

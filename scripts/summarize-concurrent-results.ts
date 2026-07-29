@@ -23,9 +23,12 @@ type QueryResult = {
   socket_queue_ms?: {
     p95: number;
   };
+  queue_latency_ms?: LatencySummary;
+  queue_timing_missing_samples?: number;
   redis_latency_ms?: LatencySummary;
   redis_timing_missing_samples?: number;
   latency_histogram_ms?: Array<[number, number]>;
+  queue_latency_histogram_ms?: Array<[number, number]>;
   redis_latency_histogram_ms?: Array<[number, number]>;
   socket_queue_histogram_ms?: Array<[number, number]>;
   latency_ms: Omit<LatencySummary, "samples">;
@@ -35,12 +38,15 @@ const PATTERN_ORDER = [
   "accountById",
   "securityById",
   "securityByNo",
+  "securityByNoDirect",
   "positionByComposite",
   "positionsByAccount",
   "transactionById",
   "transactionsByAccount",
   "transactionsBySecurity",
+  "transactionsBySecurityMaterialized",
   "transactionsByAccountSecurity",
+  "transactionsByAccountSecurityMaterialized",
   "accountPortfolioJoin",
   "accountActivityJoin",
   "accountSnapshot"
@@ -80,6 +86,11 @@ async function main() {
       p50_latency_ms: result.latency_ms.p50,
       p95_latency_ms: result.latency_ms.p95,
       p99_latency_ms: result.latency_ms.p99,
+      queue_timing_samples: result.queue_latency_ms?.samples ?? 0,
+      queue_timing_missing_samples: result.queue_timing_missing_samples ?? 0,
+      queue_p50_latency_ms: result.queue_latency_ms?.p50 ?? 0,
+      queue_p95_latency_ms: result.queue_latency_ms?.p95 ?? 0,
+      queue_p99_latency_ms: result.queue_latency_ms?.p99 ?? 0,
       redis_timing_samples: result.redis_latency_ms?.samples ?? 0,
       redis_timing_missing_samples: result.redis_timing_missing_samples ?? 0,
       redis_p50_latency_ms: result.redis_latency_ms?.p50 ?? 0,
@@ -122,6 +133,7 @@ function aggregateQueryResults(results: QueryResult[]): QueryResult {
     0
   );
   const latencyHistogram = mergeHistogram(results, "latency_histogram_ms");
+  const queueLatencyHistogram = mergeHistogram(results, "queue_latency_histogram_ms");
   const redisLatencyHistogram = mergeHistogram(results, "redis_latency_histogram_ms");
   const socketQueueHistogram = mergeHistogram(results, "socket_queue_histogram_ms");
   const fallbackLatency = (percentileName: keyof QueryResult["latency_ms"]) =>
@@ -135,6 +147,15 @@ function aggregateQueryResults(results: QueryResult[]): QueryResult {
   const completeRedisHistograms = results.every((result) =>
     Array.isArray(result.redis_latency_histogram_ms)
   );
+  const completeQueueHistograms = results.every((result) =>
+    Array.isArray(result.queue_latency_histogram_ms)
+  );
+  const queueTimingSamples = completeQueueHistograms
+    ? histogramSamples(queueLatencyHistogram)
+    : results.reduce(
+        (total, result) => total + (result.queue_latency_ms?.samples ?? 0),
+        0
+      );
   const redisTimingSamples = completeRedisHistograms
     ? histogramSamples(redisLatencyHistogram)
     : results.reduce(
@@ -149,6 +170,7 @@ function aggregateQueryResults(results: QueryResult[]): QueryResult {
     dropped_requests: sum(results, "dropped_requests"),
     http_errors: sum(results, "http_errors"),
     request_errors: sum(results, "request_errors"),
+    queue_timing_missing_samples: sum(results, "queue_timing_missing_samples"),
     redis_timing_missing_samples: sum(results, "redis_timing_missing_samples"),
     average_successful_response_bytes: weightedAverage(
       results,
@@ -167,8 +189,28 @@ function aggregateQueryResults(results: QueryResult[]): QueryResult {
           : Math.max(...results.map((result) => result.socket_queue_ms?.p95 ?? 0))
     },
     latency_histogram_ms: [...latencyHistogram.entries()],
+    queue_latency_histogram_ms: [...queueLatencyHistogram.entries()],
     redis_latency_histogram_ms: [...redisLatencyHistogram.entries()],
     socket_queue_histogram_ms: [...socketQueueHistogram.entries()],
+    queue_latency_ms: {
+      samples: queueTimingSamples,
+      p50:
+        completeQueueHistograms && queueLatencyHistogram.size > 0
+          ? percentile(queueLatencyHistogram, 0.5)
+          : Math.max(...results.map((result) => result.queue_latency_ms?.p50 ?? 0)),
+      p95:
+        completeQueueHistograms && queueLatencyHistogram.size > 0
+          ? percentile(queueLatencyHistogram, 0.95)
+          : Math.max(...results.map((result) => result.queue_latency_ms?.p95 ?? 0)),
+      p99:
+        completeQueueHistograms && queueLatencyHistogram.size > 0
+          ? percentile(queueLatencyHistogram, 0.99)
+          : Math.max(...results.map((result) => result.queue_latency_ms?.p99 ?? 0)),
+      p99_9:
+        completeQueueHistograms && queueLatencyHistogram.size > 0
+          ? percentile(queueLatencyHistogram, 0.999)
+          : Math.max(...results.map((result) => result.queue_latency_ms?.p99_9 ?? 0))
+    },
     redis_latency_ms: {
       samples: redisTimingSamples,
       p50:
@@ -202,6 +244,7 @@ function mergeHistogram(
   results: QueryResult[],
   key:
     | "latency_histogram_ms"
+    | "queue_latency_histogram_ms"
     | "redis_latency_histogram_ms"
     | "socket_queue_histogram_ms"
 ): Map<number, number> {
@@ -253,6 +296,7 @@ function sum(
     | "dropped_requests"
     | "http_errors"
     | "request_errors"
+    | "queue_timing_missing_samples"
     | "redis_timing_missing_samples"
     | "successful_response_megabytes_per_second"
 ): number {
@@ -267,7 +311,12 @@ function sum(
 async function findQueryResultPaths(rootDirectory: string): Promise<string[]> {
   const entries = await readdir(rootDirectory, { withFileTypes: true });
   const paths = entries
-    .filter((entry) => entry.isFile() && /^query-.+\.json$/.test(entry.name))
+    .filter(
+      (entry) =>
+        entry.isFile() &&
+        /^query-.+\.json$/.test(entry.name) &&
+        entry.name !== "query-comparison-summary.json"
+    )
     .map((entry) => path.join(rootDirectory, entry.name));
 
   const hostDirectories = entries
@@ -278,7 +327,11 @@ async function findQueryResultPaths(rootDirectory: string): Promise<string[]> {
     const hostDirectory = path.join(rootDirectory, directory);
     const hostEntries = await readdir(hostDirectory, { withFileTypes: true });
     for (const entry of hostEntries) {
-      if (entry.isFile() && /^query-.+\.json$/.test(entry.name)) {
+      if (
+        entry.isFile() &&
+        /^query-.+\.json$/.test(entry.name) &&
+        entry.name !== "query-comparison-summary.json"
+      ) {
         paths.push(path.join(hostDirectory, entry.name));
       }
     }
@@ -297,6 +350,11 @@ function renderMarkdown(summary: {
     p50_latency_ms: number;
     p95_latency_ms: number;
     p99_latency_ms: number;
+    queue_timing_samples: number;
+    queue_timing_missing_samples: number;
+    queue_p50_latency_ms: number;
+    queue_p95_latency_ms: number;
+    queue_p99_latency_ms: number;
     redis_timing_samples: number;
     redis_timing_missing_samples: number;
     redis_p50_latency_ms: number;
@@ -310,13 +368,13 @@ function renderMarkdown(summary: {
   const lines = [
     "# Concurrent Query Results",
     "",
-    "| Query pattern | Target/sec | Achieved/sec | HTTP p50/p95/p99 ms | Redis p50/p95/p99 ms | Redis samples/missing | Queue p95 ms | Avg payload bytes | 2xx MB/sec |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    "| Query pattern | Target/sec | Achieved/sec | HTTP p50/p95/p99 ms | API queue p50/p95/p99 ms | Queue samples/missing | Redis p50/p95/p99 ms | Redis samples/missing | Socket queue p95 ms | Avg payload bytes | 2xx MB/sec |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ...summary.queries.map(
       (query) =>
-        `| \`${query.pattern}\` | ${format(query.target_per_second)} | ${format(query.achieved_per_second)} | ${format(query.p50_latency_ms)} / ${format(query.p95_latency_ms)} / ${format(query.p99_latency_ms)} | ${format(query.redis_p50_latency_ms)} / ${format(query.redis_p95_latency_ms)} / ${format(query.redis_p99_latency_ms)} | ${format(query.redis_timing_samples)} / ${format(query.redis_timing_missing_samples)} | ${format(query.socket_queue_p95_ms)} | ${format(query.average_api_payload_bytes)} | ${format(query.successful_response_megabytes_per_second)} |`
+        `| \`${query.pattern}\` | ${format(query.target_per_second)} | ${format(query.achieved_per_second)} | ${format(query.p50_latency_ms)} / ${format(query.p95_latency_ms)} / ${format(query.p99_latency_ms)} | ${format(query.queue_p50_latency_ms)} / ${format(query.queue_p95_latency_ms)} / ${format(query.queue_p99_latency_ms)} | ${format(query.queue_timing_samples)} / ${format(query.queue_timing_missing_samples)} | ${format(query.redis_p50_latency_ms)} / ${format(query.redis_p95_latency_ms)} / ${format(query.redis_p99_latency_ms)} | ${format(query.redis_timing_samples)} / ${format(query.redis_timing_missing_samples)} | ${format(query.socket_queue_p95_ms)} | ${format(query.average_api_payload_bytes)} | ${format(query.successful_response_megabytes_per_second)} |`
     ),
-    `| **Total (${summary.query_patterns})** | **${format(summary.target_per_second)}** | **${format(summary.achieved_per_second)}** |  |  | **${format(summary.queries.reduce((total, query) => total + query.redis_timing_samples, 0))} / ${format(summary.queries.reduce((total, query) => total + query.redis_timing_missing_samples, 0))}** |  |  | **${format(summary.queries.reduce((total, query) => total + query.successful_response_megabytes_per_second, 0))}** |`,
+    `| **Total (${summary.query_patterns})** | **${format(summary.target_per_second)}** | **${format(summary.achieved_per_second)}** |  |  | **${format(summary.queries.reduce((total, query) => total + query.queue_timing_samples, 0))} / ${format(summary.queries.reduce((total, query) => total + query.queue_timing_missing_samples, 0))}** |  | **${format(summary.queries.reduce((total, query) => total + query.redis_timing_samples, 0))} / ${format(summary.queries.reduce((total, query) => total + query.redis_timing_missing_samples, 0))}** |  |  | **${format(summary.queries.reduce((total, query) => total + query.successful_response_megabytes_per_second, 0))}** |`,
     ""
   ];
   return `${lines.join("\n")}\n`;

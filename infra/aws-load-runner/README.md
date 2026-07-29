@@ -13,14 +13,16 @@ The generators reach the API through the ALB's private address. Keeping load gen
 
 | API pool | Query patterns | Target/sec in the 180k mix |
 |---|---|---:|
-| `light` | `accountById`, `securityById`, `securityByNo`, `positionByComposite`, `transactionById`, `transactionsByComposite`, `transactionsByAccountSecurity` | 54,000 across the six measured patterns |
+| `light` | Baseline light queries plus the additive `securityByNoDirect` and `transactionsByAccountSecurityMaterialized` comparison patterns | 54,000 across the six standard measured patterns; comparison traffic is opt-in |
 | `positions` | `positionsByAccount` | 9,000 |
-| `transactions` | `transactionsByAccount`, `transactionsBySecurity` | 18,000 |
+| `transactions` | `transactionsByAccount`, `transactionsBySecurity`, and the opt-in `transactionsBySecurityMaterialized` comparison | 18,000 in the standard mix |
 | `portfolio` | `accountPortfolioJoin` | 45,000 |
 | `activity` | `accountActivityJoin` | 45,000 |
 | `snapshot` | `accountSnapshot` | 9,000 |
 
-Each process enforces a hard pool-wide admission limit. Per-pattern values default to an equal-share soft reservation and can be overridden with variables such as `API_MAX_CONCURRENT_PATTERN_ACCOUNT_BY_ID`. A pattern may borrow above its reservation while the pool still has capacity; the health endpoint reports active, reservation, borrowed, and rejected counts.
+Each process enforces a hard pool-wide admission limit. The light pool reserves half its concurrency for direct-key reads by default, so indexed light queries cannot consume every slot. Per-pattern values default to an equal-share soft reservation and can be overridden with variables such as `API_MAX_CONCURRENT_PATTERN_ACCOUNT_BY_ID`. A pattern may borrow above its reservation while the pool still has capacity. Excess requests enter bounded per-pool queues for at most 250 ms before receiving HTTP 429. The health endpoint reports active, queued, timed-out, reservation, borrowed, and rejected counts.
+
+Each optimized comparison pattern uses the same API pool and shared admission lane as its baseline, so queue isolation does not bias the A/B result. Run `npm run materialize:query-comparison` once against the sampled Redis dataset, then `npm run bench:query:comparison` to execute each optimized pattern concurrently with its unchanged search baseline. This A/B harness is read-only and is not part of the standard 12-pattern mix.
 
 ## Provision
 

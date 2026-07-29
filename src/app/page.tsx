@@ -11,6 +11,7 @@ type Pattern = {
 type QueryResult = {
   data?: unknown;
   timing?: {
+    queue_ms: number;
     redis_ms: number;
     search_ms: number;
     hydrate_ms: number;
@@ -37,13 +38,24 @@ const patterns: Pattern[] = [
   { id: "accountById", label: "Account by ID", group: "Primary" },
   { id: "securityById", label: "Security by ID", group: "Primary" },
   { id: "securityByNo", label: "Security by No", group: "Secondary" },
+  { id: "securityByNoDirect", label: "Security by No (direct comparison)", group: "Comparison" },
   { id: "positionByComposite", label: "Position composite", group: "Primary" },
   { id: "positionsByAccount", label: "Positions by account", group: "Secondary" },
   { id: "transactionById", label: "Transaction by ID", group: "Primary" },
   { id: "transactionsByComposite", label: "Transactions by composite", group: "Secondary" },
   { id: "transactionsByAccount", label: "Transactions by account", group: "Secondary" },
   { id: "transactionsBySecurity", label: "Transactions by security", group: "Secondary" },
+  {
+    id: "transactionsBySecurityMaterialized",
+    label: "Transactions by security (materialized comparison)",
+    group: "Comparison"
+  },
   { id: "transactionsByAccountSecurity", label: "Transactions by account + security", group: "Secondary" },
+  {
+    id: "transactionsByAccountSecurityMaterialized",
+    label: "Transactions by account + security (materialized comparison)",
+    group: "Comparison"
+  },
   { id: "accountPortfolioJoin", label: "Account portfolio join", group: "Join" },
   { id: "accountActivityJoin", label: "Account activity join", group: "Join" },
   { id: "accountSnapshot", label: "Materialized account snapshot", group: "Read model" }
@@ -188,6 +200,7 @@ export default function Home() {
 
           {result?.timing ? (
             <div className="metrics">
+              <Metric label="Queue" value={`${result.timing.queue_ms} ms`} />
               <Metric label="Redis" value={`${result.timing.redis_ms} ms`} />
               <Metric label="Search" value={`${result.timing.search_ms} ms`} />
               <Metric label="Hydrate" value={`${result.timing.hydrate_ms} ms`} />

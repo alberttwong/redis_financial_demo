@@ -1,8 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import { performance } from "node:perf_hooks";
 import {
+  baselineQueryPattern,
   createSeededRandom,
   selectQuerySample,
   type BenchmarkSamplePool,
@@ -14,12 +15,21 @@ const QUERY_PROFILES = {
   accountById: { slug: "account-by-id", target: "default" },
   securityById: { slug: "security-by-id", target: "default" },
   securityByNo: { slug: "security-by-no", target: "default" },
+  securityByNoDirect: { slug: "security-by-no-direct", target: "default" },
   positionByComposite: { slug: "position-by-composite", target: "default" },
   positionsByAccount: { slug: "positions-by-account", target: "default" },
   transactionById: { slug: "transaction-by-id", target: "default" },
   transactionsByAccount: { slug: "transactions-by-account", target: "default" },
   transactionsBySecurity: { slug: "transactions-by-security", target: "default" },
+  transactionsBySecurityMaterialized: {
+    slug: "transactions-by-security-materialized",
+    target: "default"
+  },
   transactionsByAccountSecurity: { slug: "transactions-by-account-security", target: "default" },
+  transactionsByAccountSecurityMaterialized: {
+    slug: "transactions-by-account-security-materialized",
+    target: "default"
+  },
   accountPortfolioJoin: { slug: "account-portfolio-join", target: "join" },
   accountActivityJoin: { slug: "account-activity-join", target: "join" },
   accountSnapshot: { slug: "account-snapshot", target: "default" }
@@ -50,6 +60,7 @@ type Counters = {
 type LoadWindow = {
   counters: Counters;
   latencyHistogram: Uint32Array;
+  queueLatencyHistogram: Uint32Array;
   redisLatencyHistogram: Uint32Array;
   socketQueueHistogram: Uint32Array;
   connectionSetupHistogram: Uint32Array;
@@ -89,7 +100,9 @@ async function main() {
 
   const samplePoolSize = readPositiveNumber("QUERY_SAMPLE_POOL_SIZE", 1_000);
   const samplePool = await loadSamplePool(baseUrl, samplePoolSize);
-  const randomSeed = readPositiveNumber("QUERY_RANDOM_SEED", 20_260_714) + patternSeed(pattern);
+  const randomSeed =
+    readPositiveNumber("QUERY_RANDOM_SEED", 20_260_714) +
+    patternSeed(baselineQueryPattern(pattern));
   const random = createSeededRandom(randomSeed);
   await waitForScheduledStart();
   const transport = baseUrl.protocol === "https:" ? https : http;
@@ -108,6 +121,7 @@ async function main() {
   const runWindow = async (durationSeconds: number): Promise<LoadWindow> => {
     const counters = createCounters();
     const latencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+    const queueLatencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
     const redisLatencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
     const socketQueueHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
     const connectionSetupHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
@@ -139,6 +153,7 @@ async function main() {
           bytes = 0,
           redisCommands = 0,
           apiPayloadBytes = 0,
+          queueMs,
           redisMs,
           requestError
         }: {
@@ -146,6 +161,7 @@ async function main() {
           bytes?: number;
           redisCommands?: number;
           apiPayloadBytes?: number;
+          queueMs?: number;
           redisMs?: number;
           requestError?: unknown;
         }) => {
@@ -177,6 +193,7 @@ async function main() {
             counters.httpErrors += 1;
             counters.httpErrorResponseBytes += bytes;
           }
+          if (queueMs !== undefined) recordLatency(queueLatencyHistogram, queueMs);
           recordLatency(latencyHistogram, completedAt - requestStartedAt);
         };
 
@@ -196,6 +213,7 @@ async function main() {
             recordLatency(timeToFirstByteHistogram, performance.now() - requestStartedAt);
             const redisCommands = positiveHeaderNumber(response.headers["x-redis-command-count"]);
             const apiPayloadBytes = nonNegativeHeaderNumber(response.headers["x-query-payload-bytes"]);
+            const queueMs = optionalNonNegativeHeaderNumber(response.headers["x-query-queue-ms"]);
             const redisMs = optionalNonNegativeHeaderNumber(response.headers["x-redis-ms"]);
             response.on("data", (chunk: Buffer) => {
               bytes += chunk.length;
@@ -206,6 +224,7 @@ async function main() {
                 bytes,
                 redisCommands,
                 apiPayloadBytes,
+                queueMs,
                 redisMs
               })
             );
@@ -215,6 +234,7 @@ async function main() {
                 bytes,
                 redisCommands,
                 apiPayloadBytes,
+                queueMs,
                 redisMs,
                 requestError: error
               })
@@ -266,6 +286,7 @@ async function main() {
     return {
       counters,
       latencyHistogram,
+      queueLatencyHistogram,
       redisLatencyHistogram,
       socketQueueHistogram,
       connectionSetupHistogram,
@@ -287,6 +308,7 @@ async function main() {
   const {
     counters,
     latencyHistogram,
+    queueLatencyHistogram,
     redisLatencyHistogram,
     socketQueueHistogram,
     connectionSetupHistogram,
@@ -312,6 +334,7 @@ async function main() {
   const redisCommandsPerSuccessfulRequest =
     counters.succeeded === 0 ? 0 : counters.redisCommands / counters.succeeded;
   const redisLatency = latencySummary(redisLatencyHistogram);
+  const queueLatency = latencySummary(queueLatencyHistogram);
   const result = {
     pattern,
     accept_encoding: acceptEncoding ?? "identity",
@@ -394,6 +417,9 @@ async function main() {
       p99: percentile(latencyHistogram, counters.completed, 0.99),
       p99_9: percentile(latencyHistogram, counters.completed, 0.999)
     },
+    queue_latency_ms: queueLatency,
+    queue_timing_missing_samples: Math.max(0, counters.completed - queueLatency.samples),
+    queue_latency_histogram_ms: sparseHistogram(queueLatencyHistogram),
     redis_latency_ms: redisLatency,
     redis_timing_missing_samples: Math.max(0, counters.succeeded - redisLatency.samples),
     redis_latency_histogram_ms: sparseHistogram(redisLatencyHistogram),
@@ -417,6 +443,7 @@ async function main() {
   await writeFile(outputPath, JSON.stringify(result, null, 2) + "\n");
   const {
     latency_histogram_ms: _latencyHistogram,
+    queue_latency_histogram_ms: _queueLatencyHistogram,
     redis_latency_histogram_ms: _redisLatencyHistogram,
     ...consoleResult
   } = result;
@@ -429,6 +456,27 @@ async function main() {
 }
 
 async function loadSamplePool(baseUrl: URL, count: number): Promise<BenchmarkSamplePool> {
+  const samplePoolFile = process.env.QUERY_SAMPLE_POOL_FILE?.trim();
+  if (samplePoolFile) {
+    const pool = JSON.parse(
+      await readFile(samplePoolFile, "utf8")
+    ) as BenchmarkSamplePool;
+    for (const name of [
+      "accounts",
+      "securities",
+      "positions",
+      "transactions"
+    ] as const) {
+      const values = pool[name];
+      if (!Array.isArray(values) || values.length === 0) {
+        throw new Error(
+          `QUERY_SAMPLE_POOL_FILE ${samplePoolFile} has no ${name}`
+        );
+      }
+    }
+    return pool;
+  }
+
   const timeoutMs = readPositiveNumber("QUERY_STARTUP_TIMEOUT_MS", 60_000);
   const startedAt = performance.now();
   let lastError: unknown;
@@ -519,7 +567,7 @@ function patternSeed(pattern: QueryPattern): number {
 }
 
 function sampleIdentity(pattern: QueryPattern, sample: QuerySample): string {
-  switch (pattern) {
+  switch (baselineQueryPattern(pattern)) {
     case "accountById":
     case "positionsByAccount":
     case "accountPortfolioJoin":

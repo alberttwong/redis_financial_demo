@@ -7,9 +7,12 @@ import {
   positionsByAccount,
   securityById,
   securityByNo,
+  securityByNoDirect,
   transactionById,
   transactionsByAccount,
+  transactionsByAccountSecurityMaterialized,
   transactionsByComposite,
+  transactionsBySecurityMaterialized,
   transactionsSearch
 } from "./queries";
 import type { QueryPattern, QuerySample } from "./benchmark-samples";
@@ -30,6 +33,8 @@ export async function runQueryPattern(
       return securityById(ctx, sample.security_id);
     case "securityByNo":
       return securityByNo(ctx, sample.security_no);
+    case "securityByNoDirect":
+      return securityByNoDirect(ctx, sample.security_no);
     case "positionByComposite":
       return positionByComposite(
         ctx,
@@ -59,12 +64,21 @@ export async function runQueryPattern(
       return transactionsByAccount(ctx, sample.account_id, limit);
     case "transactionsBySecurity":
       return transactionsSearch(ctx, { securityId: sample.security_id, limit });
+    case "transactionsBySecurityMaterialized":
+      return transactionsBySecurityMaterialized(ctx, sample.security_id, limit);
     case "transactionsByAccountSecurity":
       return transactionsSearch(ctx, {
         accountId: sample.account_id,
         securityId: sample.security_id,
         limit
       });
+    case "transactionsByAccountSecurityMaterialized":
+      return transactionsByAccountSecurityMaterialized(
+        ctx,
+        sample.account_id,
+        sample.security_id,
+        limit
+      );
     case "accountPortfolioJoin":
       return accountPortfolioJoin(ctx, sample.account_id);
     case "accountActivityJoin":

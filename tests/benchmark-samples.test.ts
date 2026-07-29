@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  baselineQueryPattern,
   createSeededRandom,
   firstQuerySample,
   selectQuerySample,
@@ -73,4 +74,23 @@ test("transactions by account samples from the independent account pool", () => 
 
 test("the workbench-compatible first sample comes from a real transaction", () => {
   assert.deepEqual(firstQuerySample(pool), pool.transactions[0]);
+});
+
+test("comparison patterns use the same samples as their baseline", () => {
+  const pairs = [
+    ["securityByNo", "securityByNoDirect"],
+    ["transactionsBySecurity", "transactionsBySecurityMaterialized"],
+    [
+      "transactionsByAccountSecurity",
+      "transactionsByAccountSecurityMaterialized"
+    ]
+  ] as const;
+
+  for (const [baseline, optimized] of pairs) {
+    assert.equal(baselineQueryPattern(optimized), baseline);
+    assert.deepEqual(
+      selectQuerySample(pool, optimized, createSeededRandom(42)),
+      selectQuerySample(pool, baseline, createSeededRandom(42))
+    );
+  }
 });

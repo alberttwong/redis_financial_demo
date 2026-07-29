@@ -10,20 +10,22 @@ locals {
     for instance in aws_instance.redis_oss : "redis://${instance.private_ip}:6379"
   ])
   api_pattern_pool = {
-    positionsByAccount     = "positions"
-    transactionsByAccount  = "transactions"
-    transactionsBySecurity = "transactions"
-    accountPortfolioJoin   = "portfolio"
-    accountActivityJoin    = "activity"
-    accountSnapshot        = "snapshot"
+    positionsByAccount                 = "positions"
+    transactionsByAccount              = "transactions"
+    transactionsBySecurity             = "transactions"
+    transactionsBySecurityMaterialized = "transactions"
+    accountPortfolioJoin               = "portfolio"
+    accountActivityJoin                = "activity"
+    accountSnapshot                    = "snapshot"
   }
   api_pattern_priorities = {
-    positionsByAccount     = 100
-    transactionsByAccount  = 101
-    transactionsBySecurity = 102
-    accountPortfolioJoin   = 103
-    accountActivityJoin    = 104
-    accountSnapshot        = 105
+    positionsByAccount                 = 100
+    transactionsByAccount              = 101
+    transactionsBySecurity             = 102
+    accountPortfolioJoin               = 103
+    accountActivityJoin                = 104
+    accountSnapshot                    = 105
+    transactionsBySecurityMaterialized = 106
   }
   tags = merge(
     {

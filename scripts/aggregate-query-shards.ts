@@ -58,10 +58,12 @@ type ShardResult = {
   response_megabytes_per_second: number;
   peak_in_flight: number;
   latency_ms: LatencySummary;
+  queue_latency_ms?: SampledLatencySummary;
   socket_queue_ms?: SampledLatencySummary;
   connection_setup_ms?: SampledLatencySummary;
   time_to_first_byte_ms?: SampledLatencySummary;
   latency_histogram_ms?: Array<[number, number]>;
+  queue_latency_histogram_ms?: Array<[number, number]>;
   socket_queue_histogram_ms?: Array<[number, number]>;
   connection_setup_histogram_ms?: Array<[number, number]>;
   time_to_first_byte_histogram_ms?: Array<[number, number]>;
@@ -109,6 +111,7 @@ async function main() {
       latencyHistogram.set(latencyMs, (latencyHistogram.get(latencyMs) ?? 0) + count);
     }
   }
+  const queueLatencyHistogram = mergeHistograms(shards, "queue_latency_histogram_ms");
   const socketQueueHistogram = mergeHistograms(shards, "socket_queue_histogram_ms");
   const connectionSetupHistogram = mergeHistograms(shards, "connection_setup_histogram_ms");
   const timeToFirstByteHistogram = mergeHistograms(shards, "time_to_first_byte_histogram_ms");
@@ -185,6 +188,7 @@ async function main() {
       p99: percentile(latencyHistogram, completedRequests, 0.99),
       p99_9: percentile(latencyHistogram, completedRequests, 0.999)
     },
+    queue_latency_ms: sampledLatencySummary(queueLatencyHistogram),
     socket_queue_ms: sampledLatencySummary(socketQueueHistogram),
     connection_setup_ms: sampledLatencySummary(connectionSetupHistogram),
     time_to_first_byte_ms: sampledLatencySummary(timeToFirstByteHistogram),
@@ -201,7 +205,8 @@ async function main() {
       http_errors: result.http_errors,
       request_errors: result.request_errors,
       peak_in_flight: result.peak_in_flight,
-      latency_ms: result.latency_ms
+      latency_ms: result.latency_ms,
+      queue_latency_ms: result.queue_latency_ms
     }))
   };
 
@@ -224,6 +229,7 @@ function sumOptional<K extends keyof ShardResult>(
 function mergeHistograms(
   shards: Array<{ result: ShardResult }>,
   key:
+    | "queue_latency_histogram_ms"
     | "socket_queue_histogram_ms"
     | "connection_setup_histogram_ms"
     | "time_to_first_byte_histogram_ms"
