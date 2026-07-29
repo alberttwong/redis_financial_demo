@@ -4,16 +4,21 @@ import { performance } from "node:perf_hooks";
 import { createSeededRandom, loadBenchmarkAccountIds } from "../src/lib/benchmark-samples";
 import { INDEXES } from "../src/lib/indexes";
 import { securityKey, snapshotKey } from "../src/lib/keys";
-import { jsonMGetFields } from "../src/lib/json";
+import { jsonGet, jsonGetFields, jsonMGetFields } from "../src/lib/json";
 import { SECURITY_PROJECTION_FIELDS } from "../src/lib/projections";
 import { closeRedisClient, getRedisClient } from "../src/lib/redis";
 import { searchProjected } from "../src/lib/search";
 import { tagEquals } from "../src/lib/tag";
 import { selectTradeAccountsForShard, transactionForPosition } from "../src/lib/trade-load";
-import { applyTransaction } from "../src/lib/transaction-writes";
+import { applyTransaction, type ApplyTransactionResult } from "../src/lib/transaction-writes";
 import type { RedisConnection } from "../src/lib/redis";
 import type { PositionSample } from "../src/lib/benchmark-samples";
-import type { AccountSnapshot, SecurityProjection } from "../src/lib/types";
+import type {
+  AccountSnapshot,
+  PositionRow,
+  SecurityProjection,
+  TransactionRow
+} from "../src/lib/types";
 
 type Counters = {
   started: number;
@@ -25,6 +30,10 @@ type Counters = {
   dropped: number;
   inFlight: number;
   peakInFlight: number;
+  validationsStarted: number;
+  validationsPassed: number;
+  validationsFailed: number;
+  validationsInFlight: number;
 };
 
 const TRADE_POSITION_FIELDS = [
@@ -46,6 +55,7 @@ async function main() {
   const samplePoolSize = readPositiveInteger("TRADE_SAMPLE_POOL_SIZE", 1_000);
   const accountDiscoveryPoolSize = readPositiveInteger("TRADE_ACCOUNT_DISCOVERY_POOL_SIZE", 5_000);
   const bootstrapConcurrency = readPositiveNumber("TRADE_BOOTSTRAP_CONCURRENCY", 50);
+  const correctnessSampleEvery = readNonNegativeInteger("TRADE_CORRECTNESS_SAMPLE_EVERY", 0);
   const randomSeed = readPositiveNumber("TRADE_RANDOM_SEED", 20_260_714);
   const shardCount = readPositiveInteger("TRADE_SHARD_COUNT", 1);
   const shardIndex = readPositiveInteger("TRADE_SHARD_INDEX", 1);
@@ -112,10 +122,16 @@ async function main() {
     errors: 0,
     dropped: 0,
     inFlight: 0,
-    peakInFlight: 0
+    peakInFlight: 0,
+    validationsStarted: 0,
+    validationsPassed: 0,
+    validationsFailed: 0,
+    validationsInFlight: 0
   };
   const requestTimeoutMs = Math.max(drainTimeoutMs, 30_000);
   const latencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+  const validationLatencyHistogram = new Uint32Array(Math.ceil(requestTimeoutMs) + 2);
+  const validationErrors: string[] = [];
   const durationMs = testTimeSeconds * 1_000;
   const targetOperations = Math.floor(targetOpsPerSecond * testTimeSeconds);
   const startedAt = performance.now();
@@ -153,6 +169,18 @@ async function main() {
           if (result.status === "inserted") {
             counters.inserted += 1;
             if (performance.now() <= measurementEndsAt) counters.insertedDuringWindow += 1;
+            if (
+              correctnessSampleEvery > 0 &&
+              counters.inserted % correctnessSampleEvery === 0
+            ) {
+              startCorrectnessValidation({
+                result,
+                transaction,
+                counters,
+                latencyHistogram: validationLatencyHistogram,
+                errors: validationErrors
+              });
+            }
           } else {
             counters.duplicates += 1;
           }
@@ -191,6 +219,13 @@ async function main() {
   while (counters.inFlight > 0 && performance.now() - drainStartedAt < drainTimeoutMs) {
     await sleep(25);
   }
+  const validationDrainStartedAt = performance.now();
+  while (
+    counters.validationsInFlight > 0 &&
+    performance.now() - validationDrainStartedAt < drainTimeoutMs
+  ) {
+    await sleep(25);
+  }
 
   const finishedAt = performance.now();
   const result = {
@@ -208,6 +243,19 @@ async function main() {
     duplicate_operations: counters.duplicates,
     dropped_operations: counters.dropped,
     errors: counters.errors,
+    correctness: {
+      sample_every: correctnessSampleEvery,
+      validations_started: counters.validationsStarted,
+      validations_passed: counters.validationsPassed,
+      validations_failed: counters.validationsFailed,
+      validations_in_flight: counters.validationsInFlight,
+      latency_ms: {
+        p50: percentile(validationLatencyHistogram, counters.validationsStarted, 0.5),
+        p95: percentile(validationLatencyHistogram, counters.validationsStarted, 0.95),
+        p99: percentile(validationLatencyHistogram, counters.validationsStarted, 0.99)
+      },
+      errors: validationErrors
+    },
     peak_in_flight: counters.peakInFlight,
     position_sample_pool_size: positions.length,
     global_account_sample_pool_size: samplePoolSize,
@@ -239,9 +287,105 @@ async function main() {
   console.log(`Wrote ${outputPath}`);
 
   await closeRedisClient();
-  if (counters.errors > 0 || counters.duplicates > 0 || counters.dropped > 0 || counters.inFlight > 0) {
+  if (
+    counters.errors > 0 ||
+    counters.duplicates > 0 ||
+    counters.dropped > 0 ||
+    counters.inFlight > 0 ||
+    counters.validationsFailed > 0 ||
+    counters.validationsInFlight > 0
+  ) {
     process.exitCode = 1;
   }
+}
+
+function startCorrectnessValidation({
+  result,
+  transaction,
+  counters,
+  latencyHistogram,
+  errors
+}: {
+  result: ApplyTransactionResult;
+  transaction: TransactionRow;
+  counters: Counters;
+  latencyHistogram: Uint32Array;
+  errors: string[];
+}): void {
+  const startedAt = performance.now();
+  counters.validationsStarted += 1;
+  counters.validationsInFlight += 1;
+  void getRedisClient()
+    .then(async (client) => {
+      type SnapshotValidation = Pick<
+        AccountSnapshot,
+        "revision" | "transaction_count" | "recent_transactions" | "positions"
+      >;
+      const [storedTransaction, storedPosition, snapshot] = await Promise.all([
+        jsonGet<TransactionRow>(client, result.transaction_key),
+        jsonGet<PositionRow>(client, result.position_key),
+        jsonGetFields<SnapshotValidation>(client, result.snapshot_key, [
+          "revision",
+          "transaction_count",
+          "recent_transactions",
+          "positions"
+        ])
+      ]);
+      if (!storedTransaction || storedTransaction.transaction_id !== transaction.transaction_id) {
+        throw new Error(`transaction ${transaction.transaction_id} is not immediately readable`);
+      }
+      if (!storedPosition || !result.position_projection) {
+        throw new Error(`position ${result.position_key} is not immediately readable`);
+      }
+      if (
+        storedPosition.projection_version <
+        result.position_projection.projection_version
+      ) {
+        throw new Error(
+          `position ${result.position_key} projection version regressed`
+        );
+      }
+      if (!snapshot || snapshot.revision < result.projection_revision) {
+        throw new Error(`snapshot ${result.snapshot_key} revision regressed`);
+      }
+      const snapshotPosition = snapshot.positions.find(
+        (position) => position._id === result.position_projection?._id
+      );
+      if (
+        !snapshotPosition ||
+        snapshotPosition.projection_version <
+          result.position_projection.projection_version
+      ) {
+        throw new Error(
+          `snapshot ${result.snapshot_key} does not contain the committed position projection`
+        );
+      }
+      const newerWrites = snapshot.revision - result.projection_revision;
+      if (
+        newerWrites < snapshot.recent_transactions.length &&
+        !snapshot.recent_transactions.some(
+          (entry) => entry.transaction_id === transaction.transaction_id
+        )
+      ) {
+        throw new Error(
+          `snapshot ${result.snapshot_key} does not contain the committed recent transaction`
+        );
+      }
+      if (snapshot.transaction_count < result.projection_revision) {
+        throw new Error(`snapshot ${result.snapshot_key} transaction count regressed`);
+      }
+      counters.validationsPassed += 1;
+    })
+    .catch((error) => {
+      counters.validationsFailed += 1;
+      if (errors.length < 20) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    })
+    .finally(() => {
+      counters.validationsInFlight -= 1;
+      recordLatency(latencyHistogram, performance.now() - startedAt);
+    });
 }
 
 async function loadPositionsForAccounts(
@@ -288,6 +432,16 @@ function readPositiveInteger(name: string, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function readNonNegativeInteger(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
   }
   return parsed;
 }

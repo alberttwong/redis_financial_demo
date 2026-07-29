@@ -51,6 +51,8 @@
     "bench:redis-direct": "node --env-file-if-exists=.env.local --import tsx scripts/load-direct-redis-queries.ts",
     "bench:redis-direct:host": "bash scripts/bench-direct-redis-host.sh",
     "bench:redis-direct:aggregate": "node --import tsx scripts/aggregate-direct-redis-results.ts",
+    "bench:redis-direct:full-summary": "node --import tsx scripts/summarize-direct-read-write.ts",
+    "bench:redis-direct:full": "bash scripts/aws-direct-redis-full-load.sh",
     "bench:redis-direct:staircase-summary": "node --import tsx scripts/summarize-direct-redis-staircase.ts",
     "bench:archive": "bash scripts/archive-benchmark-results.sh",
     "bench:local": "bash scripts/bench-local.sh",

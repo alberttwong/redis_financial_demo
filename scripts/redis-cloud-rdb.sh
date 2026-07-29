@@ -186,7 +186,7 @@ restore() {
     exit 1
   fi
   manifest_uri="${REDIS_BACKUP_MANIFEST_URI:-s3://${BACKUP_BUCKET}/${LATEST_KEY}}"
-  temp_file="$(mktemp "${TMPDIR:-/tmp}/redis-rdb-restore.XXXXXX.json")"
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/redis-rdb-restore.XXXXXX")"
   trap 'rm -f "$temp_file"' RETURN
   aws s3 cp "$manifest_uri" "$temp_file" --region "$AWS_REGION" >/dev/null
   source_uris="$(jq -c '.source_uris' "$temp_file")"

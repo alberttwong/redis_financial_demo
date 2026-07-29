@@ -13,7 +13,7 @@ variable "name_prefix" {
 variable "generator_instance_type" {
   description = "EC2 instance type for each direct Redis generator."
   type        = string
-  default     = "c7i.2xlarge"
+  default     = "r8i.2xlarge"
 }
 
 variable "generator_instance_count" {

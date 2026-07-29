@@ -23,6 +23,15 @@ type TradeShardResult = {
   duplicate_operations: number;
   dropped_operations: number;
   errors: number;
+  correctness?: {
+    sample_every: number;
+    validations_started: number;
+    validations_passed: number;
+    validations_failed: number;
+    validations_in_flight: number;
+    latency_ms: Pick<LatencySummary, "p50" | "p95" | "p99">;
+    errors: string[];
+  };
   peak_in_flight: number;
   position_sample_pool_size: number;
   global_account_sample_pool_size: number;
@@ -89,6 +98,9 @@ async function main() {
   }
 
   const completedOperations = sum(shards, "completed_operations");
+  const validationFailures = shards.flatMap(({ directory, result }) =>
+    (result.correctness?.errors ?? []).map((error) => ({ directory, error }))
+  );
   const aggregate = {
     experiment: "distributed-trade-write-load",
     pattern: "tradeWrites",
@@ -109,6 +121,25 @@ async function main() {
     duplicate_operations: sum(shards, "duplicate_operations"),
     dropped_operations: sum(shards, "dropped_operations"),
     errors: sum(shards, "errors"),
+    correctness: {
+      validations_started: shards.reduce(
+        (total, { result }) => total + (result.correctness?.validations_started ?? 0),
+        0
+      ),
+      validations_passed: shards.reduce(
+        (total, { result }) => total + (result.correctness?.validations_passed ?? 0),
+        0
+      ),
+      validations_failed: shards.reduce(
+        (total, { result }) => total + (result.correctness?.validations_failed ?? 0),
+        0
+      ),
+      validations_in_flight: shards.reduce(
+        (total, { result }) => total + (result.correctness?.validations_in_flight ?? 0),
+        0
+      ),
+      errors: validationFailures.slice(0, 50)
+    },
     peak_in_flight_sum: sum(shards, "peak_in_flight"),
     global_account_sample_pool_size: Math.max(
       ...shards.map(({ result }) => result.global_account_sample_pool_size)
@@ -133,6 +164,7 @@ async function main() {
         offered_ops_per_second: result.offered_ops_per_second,
         dropped_operations: result.dropped_operations,
         errors: result.errors,
+        correctness: result.correctness,
         distinct_account_slots: result.distinct_account_slots,
         peak_in_flight: result.peak_in_flight,
         latency_ms: result.latency_ms

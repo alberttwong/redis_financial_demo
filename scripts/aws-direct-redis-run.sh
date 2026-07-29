@@ -19,6 +19,16 @@ MAX_IN_FLIGHT="${DIRECT_QUERY_MAX_IN_FLIGHT:-512}"
 RUN_ID="${DIRECT_QUERY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 BASE_RANDOM_SEED="${DIRECT_QUERY_RANDOM_SEED:-20260723}"
 START_DELAY_SECONDS="${DIRECT_QUERY_START_DELAY_SECONDS:-20}"
+PATTERNS="${DIRECT_QUERY_PATTERNS:-}"
+AWS_REGION="${AWS_REGION:-us-west-2}"
+GENERATOR_HOST_LIMIT="${AWS_DIRECT_REDIS_GENERATOR_HOST_LIMIT:-0}"
+SKIP_SYNC="${AWS_DIRECT_REDIS_SKIP_SYNC:-0}"
+STOP_ON_LIMITS="${DIRECT_QUERY_STOP_ON_LIMITS:-0}"
+P95_SLO_MS="${DIRECT_QUERY_P95_SLO_MS:-250}"
+MIN_ACHIEVEMENT_RATIO="${DIRECT_QUERY_MIN_ACHIEVEMENT_RATIO:-0.98}"
+MAX_ERROR_RATE="${DIRECT_QUERY_MAX_ERROR_RATE:-0.001}"
+COLLECT_NETWORK_ALLOWANCE_METRICS="${AWS_DIRECT_REDIS_COLLECT_NETWORK_ALLOWANCE_METRICS:-1}"
+CLOUDWATCH_METRIC_DELAY_SECONDS="${AWS_DIRECT_REDIS_CLOUDWATCH_METRIC_DELAY_SECONDS:-60}"
 REDIS_CLOUD_PROMETHEUS_ENDPOINT="${REDISCLOUD_PROMETHEUS_ENDPOINT:-}"
 REDIS_CLOUD_DATABASE_ID="${REDISCLOUD_DATABASE_ID:-}"
 REDIS_CLOUD_DATABASE_NAME="${REDISCLOUD_DATABASE_NAME:-}"
@@ -37,6 +47,26 @@ if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "DIRECT_QUERY_RUN_ID may contain only letters, numbers, dots, underscores, and hyphens." >&2
   exit 1
 fi
+if [[ -n "$PATTERNS" && ! "$PATTERNS" =~ ^[A-Za-z]+(,[A-Za-z]+)*$ ]]; then
+  echo "DIRECT_QUERY_PATTERNS must be a comma-separated list of query pattern names." >&2
+  exit 1
+fi
+if [[ ! "$GENERATOR_HOST_LIMIT" =~ ^[0-9]+$ ]]; then
+  echo "AWS_DIRECT_REDIS_GENERATOR_HOST_LIMIT must be a non-negative integer." >&2
+  exit 1
+fi
+if [[ "$SKIP_SYNC" != "0" && "$SKIP_SYNC" != "1" ]]; then
+  echo "AWS_DIRECT_REDIS_SKIP_SYNC must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "$STOP_ON_LIMITS" != "0" && "$STOP_ON_LIMITS" != "1" ]]; then
+  echo "DIRECT_QUERY_STOP_ON_LIMITS must be 0 or 1." >&2
+  exit 1
+fi
+if ! awk "BEGIN { exit !(${P95_SLO_MS} > 0 && ${MIN_ACHIEVEMENT_RATIO} > 0 && ${MIN_ACHIEVEMENT_RATIO} <= 1 && ${MAX_ERROR_RATE} >= 0 && ${MAX_ERROR_RATE} <= 1) }"; then
+  echo "Direct query limit settings must use a positive p95 SLO and ratios between zero and one." >&2
+  exit 1
+fi
 if [[ -n "$REDIS_CLOUD_PROMETHEUS_ENDPOINT" && ! "$REDIS_CLOUD_PROMETHEUS_ENDPOINT" =~ ^https?://[A-Za-z0-9._:/-]+$ && ! "$REDIS_CLOUD_PROMETHEUS_ENDPOINT" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   echo "REDISCLOUD_PROMETHEUS_ENDPOINT has an unsupported format." >&2
   exit 1
@@ -49,7 +79,16 @@ if [[ ! "$REDIS_CLOUD_DATABASE_NAME" =~ ^[A-Za-z0-9._-]*$ ]]; then
   echo "REDISCLOUD_DATABASE_NAME has an unsupported format." >&2
   exit 1
 fi
+if [[ "$COLLECT_NETWORK_ALLOWANCE_METRICS" != "0" && "$COLLECT_NETWORK_ALLOWANCE_METRICS" != "1" ]]; then
+  echo "AWS_DIRECT_REDIS_COLLECT_NETWORK_ALLOWANCE_METRICS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ ! "$CLOUDWATCH_METRIC_DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
+  echo "AWS_DIRECT_REDIS_CLOUDWATCH_METRIC_DELAY_SECONDS must be a non-negative integer." >&2
+  exit 1
+fi
 
+GENERATOR_INSTANCE_IDS_JSON="$(terraform -chdir="$TF_DIR" output -json generator_instance_ids)"
 GENERATOR_HOSTS=()
 while IFS= read -r host; do
   GENERATOR_HOSTS+=("$host")
@@ -58,6 +97,17 @@ if [[ "${#GENERATOR_HOSTS[@]}" -lt 1 ]]; then
   echo "No direct Redis generator hosts are present in ${TF_DIR}." >&2
   exit 1
 fi
+if [[ "$GENERATOR_HOST_LIMIT" -gt 0 ]]; then
+  if [[ "$GENERATOR_HOST_LIMIT" -gt "${#GENERATOR_HOSTS[@]}" ]]; then
+    echo "AWS_DIRECT_REDIS_GENERATOR_HOST_LIMIT exceeds the provisioned generator count." >&2
+    exit 1
+  fi
+  GENERATOR_HOSTS=("${GENERATOR_HOSTS[@]:0:$GENERATOR_HOST_LIMIT}")
+  GENERATOR_INSTANCE_IDS_JSON="$(jq -c --argjson limit "$GENERATOR_HOST_LIMIT" '.[0:$limit]' <<<"$GENERATOR_INSTANCE_IDS_JSON")"
+fi
+EC2_NETWORK_FLEETS_JSON="$(jq -cn \
+  --argjson generators "$GENERATOR_INSTANCE_IDS_JSON" \
+  '{generators: $generators}')"
 
 SSH_OPTS=(
   -i "$SSH_KEY_PATH"
@@ -115,17 +165,46 @@ for host in "${GENERATOR_HOSTS[@]}"; do
 done
 for pid in "${pids[@]}"; do wait "$pid"; done
 
-echo "Synchronizing the direct benchmark and installing dependencies..."
-pids=()
-for host in "${GENERATOR_HOSTS[@]}"; do
-  sync_host "$host" &
-  pids+=("$!")
-done
-for pid in "${pids[@]}"; do wait "$pid"; done
+if [[ "$SKIP_SYNC" != "1" ]]; then
+  echo "Synchronizing the direct benchmark and installing dependencies..."
+  pids=()
+  for host in "${GENERATOR_HOSTS[@]}"; do
+    sync_host "$host" &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do wait "$pid"; done
+else
+  echo "Reusing previously synchronized generator source and dependencies."
+fi
 
 IFS=',' read -r -a STAIRCASE_RATES <<<"$RATES"
 STAIRCASE_ROOT="${ROOT_DIR}/memtier-output/aws-direct-redis/staircase-${RUN_ID}"
 mkdir -p "$STAIRCASE_ROOT"
+PROGRAMMED_PATTERNS="${PATTERNS:-all}"
+jq -n \
+  --arg run_id "$RUN_ID" \
+  --arg patterns "$PROGRAMMED_PATTERNS" \
+  --argjson generator_instance_ids "$GENERATOR_INSTANCE_IDS_JSON" \
+  --argjson process_count "$PROCESS_COUNT" \
+  --argjson redis_pool_size_per_process "$REDIS_POOL_SIZE_PER_PROCESS" \
+  --argjson p95_slo_ms "$P95_SLO_MS" \
+  --argjson min_achievement_ratio "$MIN_ACHIEVEMENT_RATIO" \
+  --argjson max_error_rate "$MAX_ERROR_RATE" \
+  '{
+    run_id: $run_id,
+    architecture: "AWS load generators -> Redis Cloud OSS Cluster API",
+    query_patterns: $patterns,
+    generator_instance_ids: $generator_instance_ids,
+    process_count_per_host: $process_count,
+    redis_pool_size_per_process: $redis_pool_size_per_process,
+    thresholds: {
+      p95_slo_ms: $p95_slo_ms,
+      min_achievement_ratio: $min_achievement_ratio,
+      max_error_rate: $max_error_rate,
+      require_zero_drops: true,
+      require_drained: true
+    }
+  }' >"${STAIRCASE_ROOT}/diagnostic-config.json"
 FIRST_HOST="${GENERATOR_HOSTS[0]}"
 REMOTE_METRICS_ROOT="memtier-output/aws-direct-redis/${RUN_ID}/redis-cloud"
 REMOTE_METRICS_PID="/tmp/lpl-direct-redis-cloud-metrics-${RUN_ID}.pid"
@@ -185,6 +264,7 @@ stop_and_collect_redis_cloud_metrics() {
 }
 
 trap stop_and_collect_redis_cloud_metrics EXIT
+BENCHMARK_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 start_redis_cloud_metrics
 
 for rate in "${STAIRCASE_RATES[@]}"; do
@@ -226,6 +306,7 @@ for rate in "${STAIRCASE_RATES[@]}"; do
        DIRECT_QUERY_DRAIN_TIMEOUT_MS='${DRAIN_TIMEOUT_MS}' \
        DIRECT_QUERY_DISCONNECT_TIMEOUT_MS='${DISCONNECT_TIMEOUT_MS}' \
        DIRECT_QUERY_MAX_IN_FLIGHT='${MAX_IN_FLIGHT}' \
+       DIRECT_QUERY_PATTERNS='${PATTERNS}' \
        DIRECT_QUERY_RANDOM_SEED='${host_seed}' \
        DIRECT_QUERY_GENERATOR_HOST='${host_name}' \
        LOAD_TEST_START_AT_EPOCH_MS='${start_at_epoch_ms}' \
@@ -261,8 +342,36 @@ for rate in "${STAIRCASE_RATES[@]}"; do
   if [[ "$step_status" -ne 0 ]]; then
     echo "Direct RESP step ${rate}/sec produced one or more runner errors; artifacts were retained and the staircase will continue." >&2
   fi
+  if [[ "$STOP_ON_LIMITS" == "1" ]] && ! jq -e \
+    --argjson p95_slo_ms "$P95_SLO_MS" \
+    --argjson min_achievement_ratio "$MIN_ACHIEVEMENT_RATIO" \
+    --argjson max_error_rate "$MAX_ERROR_RATE" \
+    '
+      .all_processes_drained == true and
+      .dropped_requests == 0 and
+      (.achieved_per_second / .target_per_second) >= $min_achievement_ratio and
+      ((.errors / (.target_per_second * .test_time_seconds)) <= $max_error_rate) and
+      all(.queries[]; .p95_latency_ms <= $p95_slo_ms)
+    ' "${local_step_root}/direct-query-aggregate.json" >/dev/null; then
+    echo "Stopping this staircase: ${rate}/sec crossed the configured diagnostic limit."
+    break
+  fi
 done
 
+BENCHMARK_ENDED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 stop_and_collect_redis_cloud_metrics
+if [[ "$COLLECT_NETWORK_ALLOWANCE_METRICS" == "1" ]]; then
+  if [[ "$CLOUDWATCH_METRIC_DELAY_SECONDS" -gt 0 ]]; then
+    echo "Waiting ${CLOUDWATCH_METRIC_DELAY_SECONDS}s for CloudWatch metric publication..."
+    sleep "$CLOUDWATCH_METRIC_DELAY_SECONDS"
+  fi
+  if ! AWS_REGION="$AWS_REGION" node --import tsx scripts/capture-ec2-network-allowance-metrics.ts \
+    "$BENCHMARK_STARTED_AT" \
+    "$BENCHMARK_ENDED_AT" \
+    "$EC2_NETWORK_FLEETS_JSON" \
+    "$STAIRCASE_ROOT"; then
+    echo "Warning: EC2 network allowance metric collection failed." >&2
+  fi
+fi
 trap - EXIT
 echo "Direct Redis staircase artifacts: ${STAIRCASE_ROOT}"
