@@ -28,6 +28,7 @@ COLLECT_API_ARTIFACTS="${AWS_LOAD_RUNNER_COLLECT_API_ARTIFACTS:-1}"
 COLLECT_RUNTIME_METRICS="${AWS_LOAD_RUNNER_COLLECT_RUNTIME_METRICS:-1}"
 API_RUNTIME_POLL_INTERVAL_MS="${AWS_LOAD_RUNNER_API_RUNTIME_POLL_INTERVAL_MS:-5000}"
 COLLECT_ALB_METRICS="${AWS_LOAD_RUNNER_COLLECT_ALB_METRICS:-1}"
+COLLECT_NETWORK_ALLOWANCE_METRICS="${AWS_LOAD_RUNNER_COLLECT_NETWORK_ALLOWANCE_METRICS:-1}"
 CLOUDWATCH_METRIC_DELAY_SECONDS="${AWS_LOAD_RUNNER_CLOUDWATCH_METRIC_DELAY_SECONDS:-60}"
 COLLECT_REDIS_CLOUD_METRICS="${AWS_LOAD_RUNNER_COLLECT_REDIS_CLOUD_METRICS:-1}"
 REDIS_CLOUD_METRIC_POLL_INTERVAL_MS="${AWS_LOAD_RUNNER_REDIS_CLOUD_METRIC_POLL_INTERVAL_MS:-15000}"
@@ -61,6 +62,7 @@ API_POOL_CAPACITY_JSON="$(terraform -chdir="$TF_DIR" output -json api_pool_capac
 API_ASG_NAMES_JSON="$(terraform -chdir="$TF_DIR" output -json api_autoscaling_group_names)"
 API_TARGET_GROUP_ARNS_JSON="$(terraform -chdir="$TF_DIR" output -json api_target_group_arns)"
 API_LOAD_BALANCER_ARN_SUFFIX="$(terraform -chdir="$TF_DIR" output -raw api_load_balancer_arn_suffix)"
+GENERATOR_INSTANCE_IDS_JSON="$(terraform -chdir="$TF_DIR" output -json generator_instance_ids)"
 REDIS_CLUSTER_ROOT_NODES="$(terraform -chdir="$TF_DIR" output -raw redis_oss_cluster_root_nodes)"
 REDIS_CLUSTER_PASSWORD=""
 if [[ -n "$REDIS_CLUSTER_ROOT_NODES" ]]; then
@@ -150,6 +152,10 @@ if [[ "$COLLECT_RUNTIME_METRICS" != "0" && "$COLLECT_RUNTIME_METRICS" != "1" ]];
 fi
 if [[ "$COLLECT_ALB_METRICS" != "0" && "$COLLECT_ALB_METRICS" != "1" ]]; then
   echo "AWS_LOAD_RUNNER_COLLECT_ALB_METRICS must be 0 or 1." >&2
+  exit 1
+fi
+if [[ "$COLLECT_NETWORK_ALLOWANCE_METRICS" != "0" && "$COLLECT_NETWORK_ALLOWANCE_METRICS" != "1" ]]; then
+  echo "AWS_LOAD_RUNNER_COLLECT_NETWORK_ALLOWANCE_METRICS must be 0 or 1." >&2
   exit 1
 fi
 if [[ "$COLLECT_REDIS_CLOUD_METRICS" != "0" && "$COLLECT_REDIS_CLOUD_METRICS" != "1" ]]; then
@@ -263,6 +269,24 @@ discover_api_hosts() {
   return 1
 }
 
+discover_api_instance_ids_json() {
+  local result pool asg_name ids
+  result='{}'
+  for pool in light positions transactions portfolio activity snapshot; do
+    asg_name="$(jq -r --arg pool "$pool" '.[$pool]' <<<"$API_ASG_NAMES_JSON")"
+    ids="$(aws autoscaling describe-auto-scaling-groups \
+      --region "$AWS_REGION" \
+      --auto-scaling-group-names "$asg_name" \
+      --query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId' \
+      --output json)"
+    result="$(jq -c \
+      --arg pool "$pool" \
+      --argjson ids "$ids" \
+      '. + {($pool): $ids}' <<<"$result")"
+  done
+  printf '%s\n' "$result"
+}
+
 if [[ "$SKIP_BUNDLE_PUBLISH" == "1" ]]; then
   echo "Reusing the deployment bundle already uploaded for this retained fleet."
 else
@@ -281,6 +305,12 @@ while IFS= read -r host; do TRANSACTIONS_API_HOSTS+=("$host"); done < <(discover
 while IFS= read -r host; do PORTFOLIO_API_HOSTS+=("$host"); done < <(discover_api_hosts portfolio)
 while IFS= read -r host; do ACTIVITY_API_HOSTS+=("$host"); done < <(discover_api_hosts activity)
 while IFS= read -r host; do SNAPSHOT_API_HOSTS+=("$host"); done < <(discover_api_hosts snapshot)
+
+API_INSTANCE_IDS_JSON="$(discover_api_instance_ids_json)"
+EC2_NETWORK_FLEETS_JSON="$(jq -cn \
+  --argjson api "$API_INSTANCE_IDS_JSON" \
+  --argjson generators "$GENERATOR_INSTANCE_IDS_JSON" \
+  '$api + {generators: $generators}')"
 
 API_HOSTS=(
   "${LIGHT_API_HOSTS[@]}"
@@ -908,24 +938,37 @@ run_distributed_account_by_id() {
 
 run_distributed_concurrent() {
   local host_count="${#ACTIVE_GENERATOR_HOSTS[@]}"
-  local trade_host_count="${TRADE_GENERATOR_COUNT:-2}"
-  if [[ ! "$trade_host_count" =~ ^[1-9][0-9]*$ ]] || (( trade_host_count >= host_count )); then
-    echo "TRADE_GENERATOR_COUNT must be a positive integer smaller than the generator host count (${host_count})." >&2
+  local filtered_query_groups="${DISTRIBUTED_CONCURRENT_QUERY_GROUPS:-}"
+  local default_trade_host_count=2
+  if [[ -n "$filtered_query_groups" ]]; then
+    default_trade_host_count=0
+  fi
+  local trade_host_count="${TRADE_GENERATOR_COUNT:-$default_trade_host_count}"
+  if [[ ! "$trade_host_count" =~ ^[0-9]+$ ]] || (( trade_host_count >= host_count )); then
+    echo "TRADE_GENERATOR_COUNT must be a non-negative integer smaller than the generator host count (${host_count})." >&2
     return 1
   fi
   local query_host_count=$(( host_count - trade_host_count ))
-  if (( query_host_count < 6 )); then
-    echo "Distributed concurrent mode requires at least six query generators plus the dedicated trade generators; received ${query_host_count} query generators." >&2
-    return 1
-  fi
   local total_default_target_rps="${QUERY_DEFAULT_TARGET_RPS:-$DEFAULT_STANDARD_QUERY_TARGET_RPS}"
   local total_join_target_rps="${QUERY_JOIN_TARGET_RPS:-$DEFAULT_JOIN_QUERY_TARGET_RPS}"
+  local total_query_max_in_flight="${QUERY_MAX_IN_FLIGHT:-10000}"
+  local total_query_max_sockets="${QUERY_MAX_SOCKETS:-10000}"
+  local total_query_max_free_sockets="${QUERY_MAX_FREE_SOCKETS:-512}"
   local total_trade_target_rps="${MEMTIER_TRADE_TARGET_RPS:-30000}"
   local total_trade_max_in_flight="${TRADE_MAX_IN_FLIGHT:-10000}"
   local base_query_random_seed="${QUERY_RANDOM_SEED:-20260714}"
   local base_trade_random_seed="${TRADE_RANDOM_SEED:-20260714}"
   local value_name
-  for value_name in total_default_target_rps total_join_target_rps total_trade_target_rps total_trade_max_in_flight base_query_random_seed base_trade_random_seed; do
+  for value_name in \
+    total_default_target_rps \
+    total_join_target_rps \
+    total_query_max_in_flight \
+    total_query_max_sockets \
+    total_query_max_free_sockets \
+    total_trade_target_rps \
+    total_trade_max_in_flight \
+    base_query_random_seed \
+    base_trade_random_seed; do
     if [[ ! "${!value_name}" =~ ^[1-9][0-9]*$ ]]; then
       echo "${value_name} must be a positive integer." >&2
       return 1
@@ -939,7 +982,27 @@ run_distributed_concurrent() {
   local remote_output_root="memtier-output/concurrent-${host_count}-hosts-${run_id}"
   local -a query_groups query_group_assignments query_group_replica_counts
   local -a extra_group_order=(4 5 6 2 3 0 1)
-  if (( query_host_count >= 7 )); then
+  if [[ -n "$filtered_query_groups" ]]; then
+    if [[ ! "$filtered_query_groups" =~ ^[a-z0-9,-]+(\;[a-z0-9,-]+)*$ ]]; then
+      echo "DISTRIBUTED_CONCURRENT_QUERY_GROUPS must be semicolon-separated benchmark groups containing lowercase names, commas, and hyphens." >&2
+      return 1
+    fi
+    IFS=';' read -r -a query_groups <<<"$filtered_query_groups"
+    if (( query_host_count < ${#query_groups[@]} )); then
+      echo "Filtered distributed concurrent mode needs at least one query generator per group; received ${query_host_count} hosts for ${#query_groups[@]} groups." >&2
+      return 1
+    fi
+    local filtered_group_id
+    for (( filtered_group_id=0; filtered_group_id<${#query_groups[@]}; filtered_group_id+=1 )); do
+      query_group_replica_counts+=(0)
+    done
+    local filtered_assignment_index
+    for (( filtered_assignment_index=0; filtered_assignment_index<query_host_count; filtered_assignment_index+=1 )); do
+      filtered_group_id=$(( filtered_assignment_index % ${#query_groups[@]} ))
+      query_group_assignments+=("$filtered_group_id")
+      query_group_replica_counts[$filtered_group_id]=$(( query_group_replica_counts[$filtered_group_id] + 1 ))
+    done
+  elif (( query_host_count >= 7 )); then
     query_groups=(
       "account-by-id,security-by-id,security-by-no"
       "position-by-composite,transaction-by-id,transactions-by-account-security"
@@ -960,7 +1023,7 @@ run_distributed_concurrent() {
       query_group_assignments+=("$group_id")
       query_group_replica_counts[$group_id]=$(( query_group_replica_counts[$group_id] + 1 ))
     done
-  else
+  elif (( query_host_count >= 6 )); then
     query_groups=(
       "account-by-id,security-by-id,security-by-no,position-by-composite,transaction-by-id,transactions-by-account-security"
       "positions-by-account"
@@ -971,6 +1034,9 @@ run_distributed_concurrent() {
     )
     query_group_assignments=(0 1 2 3 4 5)
     query_group_replica_counts=(1 1 1 1 1 1)
+  else
+    echo "Distributed concurrent mode requires at least six query generators plus the dedicated trade generators; received ${query_host_count} query generators." >&2
+    return 1
   fi
   local -a generator_pids=()
   local benchmark_status=0
@@ -978,6 +1044,7 @@ run_distributed_concurrent() {
   local query_csv run_queries run_trade trade_shard_index trade_target_rps
   local trade_max_in_flight trade_random_seed query_group_id query_group_shard_index
   local query_group_shard_count query_target_rps query_join_target_rps query_random_seed
+  local query_max_in_flight query_max_sockets query_max_free_sockets
   local previous_index pid
 
   if [[ ! "$run_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -1007,6 +1074,9 @@ run_distributed_concurrent() {
     query_group_shard_count=1
     query_target_rps=1
     query_join_target_rps=1
+    query_max_in_flight=1
+    query_max_sockets=1
+    query_max_free_sockets=1
     query_random_seed="$base_query_random_seed"
     if (( index < query_host_count )); then
       run_queries=1
@@ -1020,6 +1090,9 @@ run_distributed_concurrent() {
       done
       query_target_rps="$(allocate_share "$total_default_target_rps" "$((query_group_shard_index - 1))" "$query_group_shard_count")"
       query_join_target_rps="$(allocate_share "$total_join_target_rps" "$((query_group_shard_index - 1))" "$query_group_shard_count")"
+      query_max_in_flight="$(allocate_share "$total_query_max_in_flight" "$((query_group_shard_index - 1))" "$query_group_shard_count")"
+      query_max_sockets="$(allocate_share "$total_query_max_sockets" "$((query_group_shard_index - 1))" "$query_group_shard_count")"
+      query_max_free_sockets="$(allocate_share "$total_query_max_free_sockets" "$((query_group_shard_index - 1))" "$query_group_shard_count")"
       query_random_seed=$(( base_query_random_seed + index * 1000003 ))
     else
       run_trade=1
@@ -1044,9 +1117,9 @@ run_distributed_concurrent() {
        QUERY_SOCKET_TIMEOUT_MS='${QUERY_SOCKET_TIMEOUT_MS:-30000}' \
        QUERY_DRAIN_TIMEOUT_MS='${QUERY_DRAIN_TIMEOUT_MS:-30000}' \
        QUERY_ACCEPT_ENCODING='${QUERY_ACCEPT_ENCODING:-}' \
-       QUERY_MAX_IN_FLIGHT='${QUERY_MAX_IN_FLIGHT:-10000}' \
-       QUERY_MAX_SOCKETS='${QUERY_MAX_SOCKETS:-10000}' \
-       QUERY_MAX_FREE_SOCKETS='${QUERY_MAX_FREE_SOCKETS:-512}' \
+       QUERY_MAX_IN_FLIGHT='${query_max_in_flight}' \
+       QUERY_MAX_SOCKETS='${query_max_sockets}' \
+       QUERY_MAX_FREE_SOCKETS='${query_max_free_sockets}' \
        QUERY_SAMPLE_POOL_SIZE='${QUERY_SAMPLE_POOL_SIZE:-1000}' \
        QUERY_RANDOM_SEED='${query_random_seed}' \
        QUERY_GENERATOR_SHARD_INDEX='${query_group_shard_index}' \
@@ -1352,11 +1425,14 @@ fi
 
 collect_redis_cloud_metric_artifacts
 
-if [[ "$COLLECT_ALB_METRICS" == "1" ]]; then
+if [[ "$COLLECT_ALB_METRICS" == "1" || "$COLLECT_NETWORK_ALLOWANCE_METRICS" == "1" ]]; then
   if [[ "$CLOUDWATCH_METRIC_DELAY_SECONDS" -gt 0 ]]; then
-    echo "Waiting ${CLOUDWATCH_METRIC_DELAY_SECONDS}s for CloudWatch ALB target metrics..."
+    echo "Waiting ${CLOUDWATCH_METRIC_DELAY_SECONDS}s for CloudWatch metric publication..."
     sleep "$CLOUDWATCH_METRIC_DELAY_SECONDS"
   fi
+fi
+
+if [[ "$COLLECT_ALB_METRICS" == "1" ]]; then
   if ! AWS_REGION="$AWS_REGION" node --import tsx scripts/capture-alb-target-metrics.ts \
     "$BENCHMARK_STARTED_AT" \
     "$BENCHMARK_ENDED_AT" \
@@ -1364,6 +1440,16 @@ if [[ "$COLLECT_ALB_METRICS" == "1" ]]; then
     "$API_TARGET_GROUP_ARNS_JSON" \
     "$API_RUNTIME_LOCAL_DIR"; then
     echo "Warning: ALB target metric collection failed." >&2
+  fi
+fi
+
+if [[ "$COLLECT_NETWORK_ALLOWANCE_METRICS" == "1" ]]; then
+  if ! AWS_REGION="$AWS_REGION" node --import tsx scripts/capture-ec2-network-allowance-metrics.ts \
+    "$BENCHMARK_STARTED_AT" \
+    "$BENCHMARK_ENDED_AT" \
+    "$EC2_NETWORK_FLEETS_JSON" \
+    "$API_RUNTIME_LOCAL_DIR"; then
+    echo "Warning: EC2 network allowance metric collection failed." >&2
   fi
 fi
 
@@ -1377,7 +1463,7 @@ if [[ -n "$DISTRIBUTED_OUTPUT_DIR" ]]; then
 fi
 
 echo "Downloaded generator results to memtier-output/aws-load-runner"
-echo "Runtime and ALB telemetry: ${API_RUNTIME_LOCAL_DIR}"
+echo "Runtime, ALB, and EC2 network allowance telemetry: ${API_RUNTIME_LOCAL_DIR}"
 echo "API pool workers and Redis connections:"
 echo "  light: ${#LIGHT_API_HOSTS[@]} workers, ${LIGHT_API_REDIS_POOL_SIZE} connections/worker, concurrency ${LIGHT_API_MAX_CONCURRENCY}"
 echo "  positions: ${#POSITIONS_API_HOSTS[@]} workers, ${POSITIONS_API_REDIS_POOL_SIZE} connections/worker, concurrency ${POSITIONS_API_MAX_CONCURRENCY}"

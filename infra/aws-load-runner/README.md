@@ -39,6 +39,10 @@ Build the bundle only after `.env.local` contains the live Redis endpoint. Terra
 
 The default desired API fleet is 64 `c7i.large` targets: 16 light, 4 positions, 8 transactions, 16 portfolio, 16 activity, and 4 snapshot. Every target uses 32 Redis connections. Per-target admission limits remain 128 for light, 32 for positions/transactions/snapshot, and 16 for portfolio/activity. These are calibration starting points, not a claim that 64 targets can meet the final load.
 
+Dedicated load generators default to `r8i.2xlarge`, which AWS advertises with
+up to 15 Gbps of network bandwidth in `us-west-2`. API target instance types
+remain independently configurable and are not changed by the generator choice.
+
 Change a pool independently through `api_pool_capacity`. For example:
 
 ```hcl
@@ -140,6 +144,16 @@ The runner records:
 - HTTP socket-queue, connection-setup, and time-to-first-byte percentiles.
 - Successful-response bytes, error-response bytes, and API payload bytes separately.
 - 429/5xx counts, request errors, drops, Redis commands, and per-worker admission snapshots.
+- Per-instance EC2 inbound/outbound bandwidth, packet-rate, connection-tracking, and link-local allowance counter increases.
+
+The API and generator bootstraps install the CloudWatch Agent `ethtool` plugin
+and publish the five ENA counters in the `CWAgent` namespace. After the
+benchmark, `ec2-network-allowance-metrics.json` and Markdown report fleet
+sum/average/minimum/maximum, affected instances, per-instance values, and
+missing or partial telemetry. Because these are cumulative counters, the report
+calculates the increase between the samples surrounding the load window instead
+of summing the raw CloudWatch values. Disable this collection with
+`AWS_LOAD_RUNNER_COLLECT_NETWORK_ALLOWANCE_METRICS=0`.
 
 Before sizing a fleet, run one pattern at a time against its isolated ALB pool and raise the rate until the selected latency/error SLO fails. For a direct single-target URL, leave `QUERY_STAIRCASE_TARGET_COUNT=1`; when the URL fronts a pool, set it to that pool's target count. Size each pool with:
 

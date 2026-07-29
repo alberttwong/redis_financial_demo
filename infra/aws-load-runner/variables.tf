@@ -63,6 +63,24 @@ variable "instance_type" {
   default     = "c7i.large"
 }
 
+variable "api_pool_instance_types" {
+  description = "Optional per-pool EC2 instance type overrides. Pools not listed use instance_type."
+  type        = map(string)
+  default = {
+    positions = "c6in.large"
+    snapshot  = "c6in.large"
+  }
+
+  validation {
+    condition = alltrue([
+      for pool, instance_type in var.api_pool_instance_types :
+      contains(["light", "positions", "transactions", "portfolio", "activity", "snapshot"], pool) &&
+      length(trimspace(instance_type)) > 0
+    ])
+    error_message = "api_pool_instance_types may override only the six API pools and each instance type must be non-empty."
+  }
+}
+
 variable "api_pool_capacity" {
   description = "Independent capacity, Redis connections, admission limits, and target-tracking thresholds for each API pool. Request targets are requests per target per minute."
   type = map(object({
@@ -168,7 +186,7 @@ variable "deployment_bundle_source" {
 variable "generator_instance_type" {
   description = "EC2 instance type for each dedicated load-generator host."
   type        = string
-  default     = "c7i.large"
+  default     = "r8i.2xlarge"
 }
 
 variable "generator_instance_count" {

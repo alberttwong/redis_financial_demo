@@ -364,9 +364,18 @@ The default stack creates six independently scalable API pools—`light`, `posit
 
 The load generator now enforces a true wall-clock request deadline, including time waiting for an HTTP socket, and separately reports socket queue, connection setup, time-to-first-byte, and Redis-only percentiles. Successful wire bytes, error-response bytes, and the API's `x-query-payload-bytes` value are also recorded separately. Set `QUERY_ACCEPT_ENCODING=gzip` only when compressed responses match production client behavior.
 
-During every AWS run, the harness polls `/api/health` directly on each API worker and writes raw NDJSON plus `api-runtime-summary.json` and Markdown. The per-worker summary derives interval process CPU and event-loop utilization from cumulative counters, and reports event-loop delay, active socket file descriptors, logical Redis clients, and Redis client errors. Process CPU is expressed as one-core equivalents, so it can exceed 100% when native or Node worker threads use multiple cores. The harness also captures per-pool ALB `RequestCountPerTarget`, target response-time average/p95/p99, target status counts, target connection errors, and healthy/unhealthy host counts from CloudWatch. Redis `INFO` snapshots before and after the run retain database-side `connected_clients` and command/network counters. All files are grouped under `memtier-output/aws-load-runner/api-runtime-<run-id>/`; distributed runs copy them into the run's `telemetry/` directory.
+During every AWS run, the harness polls `/api/health` directly on each API worker and writes raw NDJSON plus `api-runtime-summary.json` and Markdown. The per-worker summary derives interval process CPU and event-loop utilization from cumulative counters, and reports event-loop delay, active socket file descriptors, logical Redis clients, and Redis client errors. Process CPU is expressed as one-core equivalents, so it can exceed 100% when native or Node worker threads use multiple cores. The harness also captures per-pool ALB `RequestCountPerTarget`, target response-time average/p95/p99, target status counts, target connection errors, and healthy/unhealthy host counts from CloudWatch. The CloudWatch Agent on every API and generator instance publishes the five ENA allowance counters: inbound bandwidth, outbound bandwidth, packet rate, connection tracking, and link-local packet rate. The post-run report calculates counter increases over the benchmark window and presents coverage, affected instances, and sum/average/minimum/maximum per fleet plus per-instance values. Redis `INFO` snapshots before and after the run retain database-side `connected_clients` and command/network counters. All files are grouped under `memtier-output/aws-load-runner/api-runtime-<run-id>/`; distributed runs copy them into the run's `telemetry/` directory.
 
 For Redis Cloud Pro, the runner also discovers the subscription's private Prometheus endpoint through the Redis Cloud API and samples its aggregate database metrics from the AWS generator every 15 seconds. The raw `redis-cloud-metrics.ndjson` and its JSON/Markdown summary include operations and read/write rates, Redis-side latency, shard/main-thread CPU, connections, ingress/egress, memory pressure, fragmentation, key count, evictions, expirations, shard count, and connection-limit events. Redis Cloud API keys remain on the controlling host and are not copied to the generator. The Prometheus endpoint is private and therefore requires VPC peering, AWS Transit Gateway, PrivateLink, or another supported private route from the generator VPC; `infra/redis-cloud` can manage AWS VPC peering, request acceptance, and all VPC route-table entries with `enable_aws_vpc_peering=true`. When the endpoint is unreachable, the control-plane status and scrape errors are preserved while the Redis `INFO` snapshots remain available. See [Prometheus and Grafana with Redis Cloud](https://redis.io/docs/latest/integrate/prometheus-with-redis-cloud/).
+
+To measure Redis capacity without HTTP, ALB, API admission, or response-server
+serialization, provision `infra/aws-direct-redis-runner` and run
+`npm run bench:redis-direct:full`. The default 32-host layout dedicates a
+generator group to every read pattern and three disjoint generator shards to
+atomic trade writes. The synchronized result reports every query separately
+and validates sampled writes with immediate transaction, position, and
+account-snapshot reads. Treat this direct RESP result as Redis capacity; keep
+the AWS API runner result separate as end-to-end application capacity.
 
 Runtime polling defaults to five seconds and CloudWatch collection waits 60 seconds for metric publication. These can be adjusted or disabled without changing the workload:
 
@@ -374,6 +383,7 @@ Runtime polling defaults to five seconds and CloudWatch collection waits 60 seco
 AWS_LOAD_RUNNER_COLLECT_RUNTIME_METRICS=1
 AWS_LOAD_RUNNER_API_RUNTIME_POLL_INTERVAL_MS=5000
 AWS_LOAD_RUNNER_COLLECT_ALB_METRICS=1
+AWS_LOAD_RUNNER_COLLECT_NETWORK_ALLOWANCE_METRICS=1
 AWS_LOAD_RUNNER_CLOUDWATCH_METRIC_DELAY_SECONDS=60
 AWS_LOAD_RUNNER_COLLECT_REDIS_CLOUD_METRICS=1
 AWS_LOAD_RUNNER_REDIS_CLOUD_METRIC_POLL_INTERVAL_MS=15000

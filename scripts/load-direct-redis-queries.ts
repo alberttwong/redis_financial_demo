@@ -9,7 +9,8 @@ import {
 } from "../src/lib/benchmark-samples";
 import {
   DIRECT_QUERY_PATTERNS,
-  directQueryTargets,
+  directQueryTargetsForPatterns,
+  parseDirectQueryPatterns,
   type DirectQueryPattern
 } from "../src/lib/direct-query-benchmark";
 import { disconnectRedisPool, getRedisClient } from "../src/lib/redis";
@@ -50,7 +51,8 @@ type DirectWindow = {
 
 async function main() {
   const totalTargetRps = readPositiveNumber("DIRECT_QUERY_TOTAL_TARGET_RPS", 30_000);
-  const targets = directQueryTargets(totalTargetRps);
+  const enabledPatterns = parseDirectQueryPatterns(process.env.DIRECT_QUERY_PATTERNS);
+  const targets = directQueryTargetsForPatterns(totalTargetRps, enabledPatterns);
   const testTimeSeconds = readPositiveNumber("DIRECT_QUERY_TEST_TIME", 60);
   const warmupTimeSeconds = readNonNegativeNumber("DIRECT_QUERY_WARMUP_TIME", 10);
   const schedulerTickMs = readPositiveNumber("DIRECT_QUERY_SCHEDULER_TICK_MS", 10);
@@ -73,7 +75,7 @@ async function main() {
   ) as Record<DirectQueryPattern, () => number>;
 
   console.log(
-    `direct RESP process ${processIndex}/${processCount}: target=${format(totalTargetRps)}/sec warmup=${warmupTimeSeconds}s duration=${testTimeSeconds}s`
+    `direct RESP process ${processIndex}/${processCount}: patterns=${enabledPatterns.join(",")} target=${format(totalTargetRps)}/sec warmup=${warmupTimeSeconds}s duration=${testTimeSeconds}s`
   );
   console.log(
     `sample pool: ${Object.entries(samplePool)
@@ -88,6 +90,7 @@ async function main() {
       targets,
       samplePool,
       randoms,
+      enabledPatterns,
       maxInFlight,
       schedulerTickMs,
       histogramMaxMs
@@ -105,6 +108,7 @@ async function main() {
     targets,
     samplePool,
     randoms,
+    enabledPatterns,
     maxInFlight,
     schedulerTickMs,
     histogramMaxMs
@@ -115,7 +119,7 @@ async function main() {
   const resources = process.resourceUsage();
   const eventLoop = performance.eventLoopUtilization(eventLoopStarted);
 
-  const queries = DIRECT_QUERY_PATTERNS.map((pattern) =>
+  const queries = enabledPatterns.map((pattern) =>
     summarizePattern(measurement.patterns[pattern], testTimeSeconds)
   );
   const achievedPerSecond = round(
@@ -140,6 +144,7 @@ async function main() {
       process_count: processCount,
       redis_pool_size: readPositiveInteger("REDIS_POOL_SIZE", 1)
     },
+    query_patterns: enabledPatterns,
     random_seed: randomSeed,
     sample_pool_size: Object.fromEntries(
       Object.entries(samplePool).map(([name, values]) => [name, values.length])
@@ -187,6 +192,7 @@ async function runWindow({
   targets,
   samplePool,
   randoms,
+  enabledPatterns,
   maxInFlight,
   schedulerTickMs,
   histogramMaxMs
@@ -195,6 +201,7 @@ async function runWindow({
   targets: Record<DirectQueryPattern, number>;
   samplePool: BenchmarkSamplePool;
   randoms: Record<DirectQueryPattern, () => number>;
+  enabledPatterns: readonly DirectQueryPattern[];
   maxInFlight: number;
   schedulerTickMs: number;
   histogramMaxMs: number;
@@ -215,7 +222,9 @@ async function runWindow({
   const patternInFlightLimits = Object.fromEntries(
     DIRECT_QUERY_PATTERNS.map((pattern) => [
       pattern,
-      Math.max(1, Math.floor((maxInFlight * targets[pattern]) / totalTargetRps))
+      targets[pattern] > 0
+        ? Math.max(1, Math.floor((maxInFlight * targets[pattern]) / totalTargetRps))
+        : 0
     ])
   ) as Record<DirectQueryPattern, number>;
 
@@ -265,7 +274,7 @@ async function runWindow({
   };
 
   await Promise.all(
-    DIRECT_QUERY_PATTERNS.map(
+    enabledPatterns.map(
       (pattern) =>
         new Promise<void>((resolve) => {
           const state = patterns[pattern];

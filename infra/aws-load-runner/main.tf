@@ -243,6 +243,12 @@ resource "aws_s3_object" "deployment_bundle" {
     aws_s3_bucket_server_side_encryption_configuration.deployment,
     aws_s3_bucket_versioning.deployment,
   ]
+
+  # The benchmark runner publishes the current bundle before a fleet refresh.
+  # Preserve that known-good object during unrelated Terraform changes.
+  lifecycle {
+    ignore_changes = [etag]
+  }
 }
 
 resource "aws_iam_role" "runner" {
@@ -266,6 +272,26 @@ resource "aws_iam_role" "runner" {
 resource "aws_iam_role_policy_attachment" "ssm" {
   role       = aws_iam_role.runner.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy" "network_allowance_metrics" {
+  name = "${var.name_prefix}-network-allowance-metrics"
+  role = aws_iam_role.runner.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = "CWAgent"
+          }
+        }
+      }
+    ]
+  })
 }
 
 resource "aws_iam_role_policy" "deployment_bundle" {
@@ -369,7 +395,7 @@ resource "aws_launch_template" "api" {
 
   name_prefix            = "${var.name_prefix}-${each.key}-"
   image_id               = data.aws_ami.al2023.id
-  instance_type          = var.instance_type
+  instance_type          = lookup(var.api_pool_instance_types, each.key, var.instance_type)
   key_name               = var.key_name
   update_default_version = true
   vpc_security_group_ids = [aws_security_group.runner.id]

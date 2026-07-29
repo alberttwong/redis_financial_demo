@@ -102,7 +102,9 @@ async function main() {
     }
   }
 
-  const queries = DIRECT_QUERY_PATTERNS.map((pattern) => {
+  const queries = DIRECT_QUERY_PATTERNS.filter(
+    (pattern) => states[pattern].targetPerSecond > 0
+  ).map((pattern) => {
     const state = states[pattern];
     return {
       pattern,
@@ -124,8 +126,10 @@ async function main() {
           ? 0
           : round(state.payloadBytesWeighted / state.successfulRequests),
       payload_mebibytes_per_second: round(state.payloadMiBPerSecond),
-      distinct_sample_keys_min: Math.min(...state.distinctSampleKeys),
-      distinct_sample_keys_max: Math.max(...state.distinctSampleKeys)
+      distinct_sample_keys_min:
+        state.distinctSampleKeys.length === 0 ? 0 : Math.min(...state.distinctSampleKeys),
+      distinct_sample_keys_max:
+        state.distinctSampleKeys.length === 0 ? 0 : Math.max(...state.distinctSampleKeys)
     };
   });
   const summary = {
